@@ -49,6 +49,7 @@ public class MainWindow extends JFrame {
     private final JCheckBox subPathBox = new JCheckBox("子路径拆分", false);
     private final JCheckBox signatureBox = new JCheckBox("删除泛型签名", true);
     private final JCheckBox framesBox = new JCheckBox("重建栈帧", true);
+    private final JCheckBox reorderBox = new JCheckBox("方法重排", true);
     private final JTextArea logArea = new JTextArea();
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel statusLabel = new JLabel("就绪");
@@ -127,7 +128,7 @@ public class MainWindow extends JFrame {
         outputButton.addActionListener(event -> selectOutputJar());
         libraryButton.addActionListener(event -> selectLibraryJars());
 
-        JPanel optionPanel = new JPanel(new GridLayout(2, 6, 4, 4));
+        JPanel optionPanel = new JPanel(new GridLayout(2, 7, 4, 4));
         optionPanel.setBorder(new TitledBorder("混淆选项"));
         optionPanel.add(classBox);
         optionPanel.add(memberBox);
@@ -141,6 +142,7 @@ public class MainWindow extends JFrame {
         optionPanel.add(subPathBox);
         optionPanel.add(signatureBox);
         optionPanel.add(framesBox);
+        optionPanel.add(reorderBox);
         classPathBox.addActionListener(event -> classPathField.setEnabled(classPathBox.isSelected()));
 
         logArea.setEditable(false);
@@ -251,6 +253,7 @@ public class MainWindow extends JFrame {
         config.splitSubPath = subPathBox.isSelected();
         config.stripSignatures = signatureBox.isSelected();
         config.rebuildStackMapFrames = framesBox.isSelected();
+        config.reorderMethods = reorderBox.isSelected();
 
         logArea.setText("");
         progressBar.setValue(0);
@@ -303,6 +306,7 @@ public class MainWindow extends JFrame {
         subPathBox.setEnabled(!busy);
         signatureBox.setEnabled(!busy);
         framesBox.setEnabled(!busy);
+        reorderBox.setEnabled(!busy);
         inputButton.setEnabled(!busy);
         outputButton.setEnabled(!busy);
         libraryButton.setEnabled(!busy);

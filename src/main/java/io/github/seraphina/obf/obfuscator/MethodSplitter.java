@@ -123,14 +123,35 @@ public class MethodSplitter {
             return;
         }
         List<AbstractInsnNode> real = realInstructions(method);
-        if (real.size() < 8 || real.size() != realInstructions(originalMethod).size()) {
+        if (real.size() < 24 || real.size() != realInstructions(originalMethod).size()) {
             return;
         }
+        Map<LabelNode, Integer> labels = labelPositions(method);
+        int[] crossing = new int[real.size() + 1];
+        boolean branching = false;
         for (int position = 0; position < real.size(); position++) {
             AbstractInsnNode instruction = real.get(position);
             int opcode = instruction.getOpcode();
-            if (instruction instanceof JumpInsnNode || instruction instanceof TableSwitchInsnNode || instruction instanceof LookupSwitchInsnNode) {
+            if (opcode == Opcodes.JSR || opcode == Opcodes.RET) {
                 return;
+            }
+            if (instruction instanceof JumpInsnNode) {
+                branching = true;
+                markCrossing(crossing, real.size(), position, labels.getOrDefault(((JumpInsnNode) instruction).label, real.size()));
+            } else if (instruction instanceof TableSwitchInsnNode) {
+                branching = true;
+                TableSwitchInsnNode tableSwitch = (TableSwitchInsnNode) instruction;
+                markCrossing(crossing, real.size(), position, labels.getOrDefault(tableSwitch.dflt, real.size()));
+                for (LabelNode label : tableSwitch.labels) {
+                    markCrossing(crossing, real.size(), position, labels.getOrDefault(label, real.size()));
+                }
+            } else if (instruction instanceof LookupSwitchInsnNode) {
+                branching = true;
+                LookupSwitchInsnNode lookupSwitch = (LookupSwitchInsnNode) instruction;
+                markCrossing(crossing, real.size(), position, labels.getOrDefault(lookupSwitch.dflt, real.size()));
+                for (LabelNode label : lookupSwitch.labels) {
+                    markCrossing(crossing, real.size(), position, labels.getOrDefault(label, real.size()));
+                }
             }
             if (opcode == Opcodes.MONITORENTER || opcode == Opcodes.MONITOREXIT) {
                 return;
@@ -149,6 +170,9 @@ public class MethodSplitter {
                 }
             }
         }
+        if (branching && !config.rebuildStackMapFrames) {
+            return;
+        }
         Frame<BasicValue>[] frames = analyze(originalNode, originalMethod);
         List<Integer> positions = new ArrayList<>();
         for (int index = 0; index < originalMethod.instructions.size(); index++) {
@@ -158,7 +182,15 @@ public class MethodSplitter {
             }
             positions.add(index);
         }
-        if (frames == null || frames.length != originalMethod.instructions.size() || positions.size() != real.size()) {
+        List<Integer> chunkPositions = new ArrayList<>();
+        for (int index = 0; index < method.instructions.size(); index++) {
+            AbstractInsnNode instruction = method.instructions.get(index);
+            if (instruction instanceof LabelNode || instruction instanceof LineNumberNode || instruction instanceof FrameNode) {
+                continue;
+            }
+            chunkPositions.add(index);
+        }
+        if (frames == null || frames.length != originalMethod.instructions.size() || positions.size() != real.size() || chunkPositions.size() != real.size()) {
             return;
         }
         for (int position = 0; position < real.size(); position++) {
@@ -174,7 +206,13 @@ public class MethodSplitter {
                 }
             }
         }
-        List<Integer> boundaries = chooseBoundaries(node, real, positions, frames);
+        boolean[] blocked = new boolean[real.size()];
+        int active = 0;
+        for (int position = 1; position < real.size(); position++) {
+            active += crossing[position];
+            blocked[position] = active > 0;
+        }
+        List<Integer> boundaries = chooseBoundaries(node, real, blocked, positions, frames);
         if (boundaries.isEmpty()) {
             return;
         }
@@ -187,7 +225,7 @@ public class MethodSplitter {
             int end = chunkIndex == boundaries.size() ? real.size() : boundaries.get(chunkIndex);
             boolean last = chunkIndex == boundaries.size();
             ClassNode target = holder == null ? node : holder;
-            MethodNode chunk = createChunk(node, method, target, real, positions, frames, start, end, last);
+            MethodNode chunk = createChunk(node, method, target, positions, chunkPositions, frames, start, end, last);
             target.methods.add(chunk);
             chunks.add(chunk);
             chunkOwners.add(target.name);
@@ -235,13 +273,38 @@ public class MethodSplitter {
         method.maxLocals = 0;
     }
 
-    private List<Integer> chooseBoundaries(ClassNode node, List<AbstractInsnNode> real, List<Integer> positions, Frame<BasicValue>[] frames) {
-        int minimum = 4;
-        int maximumChunks = 4;
+    private Map<LabelNode, Integer> labelPositions(MethodNode method) {
+        Map<LabelNode, Integer> labels = new HashMap<>();
+        int position = 0;
+        for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+            if (instruction instanceof LabelNode) {
+                labels.putIfAbsent((LabelNode) instruction, position);
+                continue;
+            }
+            if (instruction instanceof LineNumberNode || instruction instanceof FrameNode) {
+                continue;
+            }
+            position++;
+        }
+        return labels;
+    }
+
+    private void markCrossing(int[] crossing, int size, int from, int to) {
+        int low = Math.min(from, to) + 1;
+        int high = Math.min(Math.max(from, to), size - 1);
+        if (low > high) {
+            return;
+        }
+        crossing[low]++;
+        crossing[high + 1]--;
+    }
+
+    private List<Integer> chooseBoundaries(ClassNode node, List<AbstractInsnNode> real, boolean[] blocked, List<Integer> positions, Frame<BasicValue>[] frames) {
+        int minimum = 12;
+        int maximumChunks = 3;
         List<Integer> candidates = new ArrayList<>();
         for (int position = 1; position < real.size() - 1; position++) {
-            Frame<BasicValue> frame = frames[positions.get(position)];
-            if (frame != null && frame.getStackSize() == 0) {
+            if (frames[positions.get(position)].getStackSize() == 0 && !blocked[position]) {
                 candidates.add(position);
             }
         }
@@ -269,13 +332,22 @@ public class MethodSplitter {
         return boundaries;
     }
 
-    private MethodNode createChunk(ClassNode node, MethodNode method, ClassNode target, List<AbstractInsnNode> real, List<Integer> positions, Frame<BasicValue>[] frames, int start, int end, boolean last) {
+    private MethodNode createChunk(ClassNode node, MethodNode method, ClassNode target, List<Integer> positions, List<Integer> chunkPositions, Frame<BasicValue>[] frames, int start, int end, boolean last) {
         boolean nested = target != node;
         int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         String descriptor = "([Ljava/lang/Object;)" + (last ? Type.getReturnType(method.desc).getDescriptor() : "V");
         MethodNode chunk = new MethodNode(access, nextChunkName(target), descriptor, null, null);
+        int previous = start == 0 ? -1 : chunkPositions.get(start - 1);
         for (int position = start; position < end; position++) {
-            AbstractInsnNode instruction = real.get(position);
+            int index = chunkPositions.get(position);
+            for (int scan = previous + 1; scan < index; scan++) {
+                AbstractInsnNode pseudo = method.instructions.get(scan);
+                if (pseudo instanceof LabelNode) {
+                    chunk.instructions.add(pseudo);
+                }
+            }
+            previous = index;
+            AbstractInsnNode instruction = method.instructions.get(index);
             if (instruction instanceof VarInsnNode) {
                 VarInsnNode variable = (VarInsnNode) instruction;
                 if (variable.getOpcode() >= Opcodes.ILOAD && variable.getOpcode() <= Opcodes.ALOAD) {

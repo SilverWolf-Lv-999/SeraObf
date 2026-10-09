@@ -43,6 +43,9 @@ public class Main {
             if (args.length >= 12) {
                 config.rebuildStackMapFrames = Boolean.parseBoolean(args[11]);
             }
+            if (args.length >= 13) {
+                config.reorderMethods = Boolean.parseBoolean(args[12]);
+            }
             new Obfuscator(config, System.out::println, value -> {
             }).obfuscate();
             return;

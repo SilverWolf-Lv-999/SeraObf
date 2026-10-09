@@ -30,6 +30,8 @@ public final class ClientConfig {
 
     public boolean rebuildStackMapFrames = true;
 
+    public boolean reorderMethods = true;
+
     public boolean splitMethods = true;
 
     public boolean randomSplitClass = true;

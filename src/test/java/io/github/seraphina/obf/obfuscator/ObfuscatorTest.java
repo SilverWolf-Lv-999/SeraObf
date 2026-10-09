@@ -9,9 +9,14 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LineNumberNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.util.CheckClassAdapter;
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +110,24 @@ class ObfuscatorTest {
             "        }",
             "    }",
             "",
+            "    public static int digest(int seed, int steps) {",
+            "        int total = seed;",
+            "        total += seed * 3;",
+            "        total ^= total >>> 5;",
+            "        total *= 11;",
+            "        total -= seed << 2;",
+            "        for (int index = 0; index < steps; index++) {",
+            "            int value = index * 3 + seed;",
+            "            if ((index & 1) == 0) {",
+            "                total += value;",
+            "            } else {",
+            "                total -= value >> 1;",
+            "            }",
+            "            total ^= index;",
+            "        }",
+            "        return total;",
+            "    }",
+            "",
             "    public static void main(String[] args) {",
             "        Sample sample = new Sample();",
             "        System.out.println(sample.value());",
@@ -116,6 +139,7 @@ class ObfuscatorTest {
             "        System.out.println(\"mixed=\" + mixed(true, (byte) 1, 'A', (short) 2));",
             "        System.out.println(\"reflect=\" + reflectName());",
             "        System.out.println(LABEL);",
+            "        System.out.println(\"digest=\" + digest(3, 5));",
             "    }",
             "",
             "    static class Nested {",
@@ -171,6 +195,63 @@ class ObfuscatorTest {
             "    }",
             "}",
             "");
+
+    @Test
+    void outlinesBranchingMethodsWithoutFragmenting() throws Exception {
+        Path workDir = Files.createTempDirectory("seraobf-outline");
+        Path inputJar = compileSample(workDir);
+        Path outputJar = workDir.resolve("outline.jar");
+        ClientConfig config = prepare(inputJar, outputJar, "obf.outline.probe", true, true, false, "", "", true);
+        config.dictionarySeed = 20261009L;
+        obfuscate(config);
+
+        int chunks = 0;
+        boolean branching = false;
+        for (ClassNode node : readClassNodes(outputJar)) {
+            for (MethodNode method : node.methods) {
+                if (!method.name.startsWith("$split")) {
+                    continue;
+                }
+                chunks++;
+                int instructions = realInstructions(method);
+                assertTrue(instructions >= 12, node.name + '#' + method.name + ' ' + instructions);
+                branching |= hasJump(method);
+            }
+        }
+        assertTrue(chunks > 0);
+        assertTrue(branching);
+        assertTrue(chunks * 2 < methodCount(inputJar));
+        String processOutput = runJar(outputJar);
+        assertTrue(processOutput.contains("digest=140"), processOutput);
+        assertTrue(processOutput.contains("prefix-value-hidden-value"), processOutput);
+    }
+
+    @Test
+    void reordersMethodsWithoutLosingAny() throws Exception {
+        Path workDir = Files.createTempDirectory("seraobf-reorder");
+        Path inputJar = compileSample(workDir);
+        Path outputJar = workDir.resolve("reorder.jar");
+        ClientConfig config = prepare(inputJar, outputJar, "", false, false, false, "", "", true);
+        config.dictionarySeed = 20261009L;
+        config.renameClasses = false;
+        config.renameMembers = false;
+        config.encryptStrings = false;
+        obfuscate(config);
+
+        Map<String, List<String>> before = methodSequences(inputJar);
+        Map<String, List<String>> after = methodSequences(outputJar);
+        int reordered = 0;
+        for (Map.Entry<String, List<String>> entry : before.entrySet()) {
+            List<String> methods = after.get(entry.getKey());
+            assertNotNull(methods, entry.getKey());
+            assertEquals(new HashSet<>(entry.getValue()), new HashSet<>(methods), entry.getKey());
+            if (!entry.getValue().equals(methods)) {
+                reordered++;
+            }
+        }
+        assertTrue(reordered > 0);
+        assertTrue(runJar(outputJar).contains("prefix-value-hidden-value"));
+    }
 
     @Test
     void stripsSignaturesAndRebuildsFrames() throws Exception {
@@ -270,6 +351,7 @@ class ObfuscatorTest {
         verifyClasses(outputJar);
         String processOutput = runJar(outputJar);
         assertTrue(processOutput.contains("label-value"), processOutput);
+        assertTrue(processOutput.contains("digest=140"), processOutput);
         assertTrue(processOutput.contains("prefix-value-hidden-value"), processOutput);
         assertTrue(processOutput.contains("nested-value"), processOutput);
     }
@@ -469,6 +551,7 @@ class ObfuscatorTest {
         config.stripDebugInfo = true;
         config.stripSignatures = true;
         config.rebuildStackMapFrames = true;
+        config.reorderMethods = true;
         config.splitMethods = splitMethods;
         config.randomSplitClass = randomSplitClass;
         config.randomSplitMethodName = randomSplitMethodName;
@@ -557,6 +640,45 @@ class ObfuscatorTest {
             }
         }
         return names;
+    }
+
+    private static Map<String, List<String>> methodSequences(Path jarPath) throws Exception {
+        Map<String, List<String>> sequences = new LinkedHashMap<>();
+        for (ClassNode node : readClassNodes(jarPath)) {
+            List<String> names = new ArrayList<>();
+            for (MethodNode method : node.methods) {
+                names.add(method.name);
+            }
+            sequences.put(node.name, names);
+        }
+        return sequences;
+    }
+
+    private static int methodCount(Path jarPath) throws Exception {
+        int count = 0;
+        for (ClassNode node : readClassNodes(jarPath)) {
+            count += node.methods.size();
+        }
+        return count;
+    }
+
+    private static int realInstructions(MethodNode method) {
+        int count = 0;
+        for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+            if (!(instruction instanceof LabelNode || instruction instanceof LineNumberNode || instruction instanceof FrameNode)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static boolean hasJump(MethodNode method) {
+        for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+            if (instruction instanceof JumpInsnNode || instruction instanceof TableSwitchInsnNode || instruction instanceof LookupSwitchInsnNode) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<ClassNode> readClassNodes(Path jarPath) throws Exception {

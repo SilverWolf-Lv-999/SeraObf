@@ -41,12 +41,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.Locale;
 import java.util.function.Consumer;
@@ -858,6 +860,9 @@ public class Obfuscator {
         }
         if (config.encryptStrings || config.adaptClassStrings || !stringReplacements.isEmpty()) {
             new StringRewriter(config, node, classMapping, stringReplacements, nameAllocator).rewrite();
+        }
+        if (config.reorderMethods) {
+            Collections.shuffle(node.methods, new Random(nameAllocator.getSeed() * 31L + node.name.hashCode()));
         }
         ClassWriter writer = rebuildFrames ? new FrameClassWriter(frameClassLoader, frameClasses, commonSuperCache) : new ClassWriter(ClassWriter.COMPUTE_MAXS);
         node.accept(writer);
