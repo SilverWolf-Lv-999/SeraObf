@@ -31,4 +31,9 @@ public final class ClientConfig {
     public String keepRules = "";
 
     public String stringReplacements = "";
+
+    public boolean keepServiceNames = true;
+
+    private ClientConfig() {
+    }
 }

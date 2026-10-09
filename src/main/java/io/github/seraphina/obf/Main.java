@@ -25,6 +25,9 @@ public class Main {
             if (args.length >= 6) {
                 config.stringReplacements = args[5];
             }
+            if (args.length >= 7) {
+                config.keepServiceNames = Boolean.parseBoolean(args[6]);
+            }
             new Obfuscator(config, System.out::println, value -> {
             }).obfuscate();
             return;

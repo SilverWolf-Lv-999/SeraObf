@@ -94,18 +94,20 @@ public class Obfuscator {
                 continue;
             }
             String serviceName = entry.getKey().substring("META-INF/services/".length());
-            if (!serviceName.isEmpty()) {
+            if (config.keepServiceNames && !serviceName.isEmpty()) {
                 serviceProviders.add(NameUtility.internalName(serviceName));
             }
             for (String line : new String(entry.getValue(), StandardCharsets.UTF_8).split("[\\r\\n]+")) {
                 String name = line.trim();
-                if (!name.isEmpty() && !name.startsWith("#")) {
+                if (config.keepServiceNames && !name.isEmpty() && !name.startsWith("#")) {
                     serviceProviders.add(NameUtility.internalName(name));
                 }
             }
         }
-        if (!serviceProviders.isEmpty()) {
+        if (config.keepServiceNames && !serviceProviders.isEmpty()) {
             logger.accept("服务提供者类: " + serviceProviders.size() + " 个 (保留类名)");
+        } else if (!config.keepServiceNames) {
+            logger.accept("服务提供者类: 参与混淆 (服务文件同步改写)");
         }
         logger.accept("混淆类路径: " + (config.renameClasses && !config.obfuscateClassPath.isBlank() ? config.obfuscateClassPath.trim() : "保持原包"));
         for (String rule : config.keepRules.split("[,;\\s]+")) {

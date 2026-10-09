@@ -135,13 +135,24 @@ class ObfuscatorTest {
             "}",
             "");
 
+    private static final String GREETER_PROVIDER_SOURCE = String.join("\n",
+            "package demo;",
+            "",
+            "public class GreeterProvider implements Greeter {",
+            "    @Override",
+            "    public String greet() {",
+            "        return \"provider\";",
+            "    }",
+            "}",
+            "");
+
     @Test
     void obfuscatesJarEndToEnd() throws Exception {
         Path workDir = Files.createTempDirectory("seraobf");
         Path inputJar = compileSample(workDir);
 
         Path outputJar = workDir.resolve("output.jar");
-        String mainClass = obfuscate(inputJar, outputJar, "obf.myapp.random", true, true, true, "", "");
+        String mainClass = obfuscate(inputJar, outputJar, "obf.myapp.random", true, true, true, "", "", true);
         assertTrue(mainClass.startsWith("obf.myapp.random."), mainClass);
         assertTrue(countClasses(outputJar) > countClasses(inputJar));
         String rsrcMainClass;
@@ -167,18 +178,21 @@ class ObfuscatorTest {
         assertFalse(processOutput.contains("reflect=missing"), processOutput);
         assertFalse(processOutput.contains("reflect=text"), processOutput);
         assertTrue(processOutput.contains(rsrcMainClass), processOutput);
+        String[] serviceEntry = readServiceEntry(outputJar);
+        assertEquals("META-INF/services/demo.Greeter", serviceEntry[0]);
+        assertEquals("demo.GreeterProvider", serviceEntry[1]);
 
         Path keptJar = workDir.resolve("kept.jar");
-        String keptMainClass = obfuscate(inputJar, keptJar, "", true, true, true, "", "");
+        String keptMainClass = obfuscate(inputJar, keptJar, "", true, true, true, "", "", true);
         assertTrue(keptMainClass.startsWith("demo."), keptMainClass);
         assertTrue(runJar(keptJar).contains("prefix-value-hidden-value"));
 
         Path plainJar = workDir.resolve("plain.jar");
-        obfuscate(inputJar, plainJar, "obf.myapp.random", false, true, true, "", "");
+        obfuscate(inputJar, plainJar, "obf.myapp.random", false, true, true, "", "", true);
         assertEquals(countClasses(inputJar), countClasses(plainJar));
 
         Path inlineJar = workDir.resolve("inline.jar");
-        String inlineMainClass = obfuscate(inputJar, inlineJar, "obf.myapp.random", true, false, false, "", "");
+        String inlineMainClass = obfuscate(inputJar, inlineJar, "obf.myapp.random", true, false, false, "", "", true);
         assertEquals(countClasses(inputJar), countClasses(inlineJar));
         try (JarFile jarFile = new JarFile(inlineJar.toFile())) {
             byte[] classBytes;
@@ -190,33 +204,48 @@ class ObfuscatorTest {
         assertTrue(runJar(inlineJar).contains("prefix-value-hidden-value"));
 
         Path replacedJar = workDir.resolve("replaced.jar");
-        obfuscate(inputJar, replacedJar, "", true, true, true, "", "hidden-value=patched-value");
+        obfuscate(inputJar, replacedJar, "", true, true, true, "", "hidden-value=patched-value", true);
         assertTrue(runJar(replacedJar).contains("patched-value"));
+
+        Path serviceJar = workDir.resolve("service.jar");
+        obfuscate(inputJar, serviceJar, "", true, true, true, "", "", false);
+        String[] remappedService = readServiceEntry(serviceJar);
+        assertNotEquals("META-INF/services/demo.Greeter", remappedService[0]);
+        assertNotEquals("demo.GreeterProvider", remappedService[1]);
+        try (JarFile jarFile = new JarFile(serviceJar.toFile())) {
+            assertNotNull(jarFile.getJarEntry(remappedService[1].replace('.', '/') + ".class"));
+        }
+        assertTrue(runJar(serviceJar).contains("prefix-value-hidden-value"));
     }
 
     private static Path compileSample(Path workDir) throws Exception {
         Path sourceFile = workDir.resolve("src/demo/Sample.java");
         Path greeterFile = workDir.resolve("src/demo/Greeter.java");
         Path launcherFile = workDir.resolve("src/demo/Launcher.java");
+        Path providerFile = workDir.resolve("src/demo/GreeterProvider.java");
         Path classDir = workDir.resolve("classes");
         Files.createDirectories(sourceFile.getParent());
         Files.createDirectories(classDir);
         Files.writeString(sourceFile, SAMPLE_SOURCE);
         Files.writeString(greeterFile, GREETER_SOURCE);
         Files.writeString(launcherFile, LAUNCHER_SOURCE);
-        assertEquals(0, ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", classDir.toString(), sourceFile.toString(), greeterFile.toString(), launcherFile.toString()));
+        Files.writeString(providerFile, GREETER_PROVIDER_SOURCE);
+        assertEquals(0, ToolProvider.getSystemJavaCompiler().run(null, null, null, "-d", classDir.toString(), sourceFile.toString(), greeterFile.toString(), launcherFile.toString(), providerFile.toString()));
         Path jarPath = workDir.resolve("input.jar");
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
         manifest.getMainAttributes().putValue("Main-Class", "demo.Launcher ");
         manifest.getMainAttributes().putValue("Rsrc-Main-Class", "demo.Sample");
         try (JarOutputStream jarStream = new JarOutputStream(Files.newOutputStream(jarPath), manifest)) {
+            jarStream.putNextEntry(new JarEntry("META-INF/services/demo.Greeter"));
+            jarStream.write("demo.GreeterProvider\n".getBytes(StandardCharsets.UTF_8));
+            jarStream.closeEntry();
             writeEntries(jarStream, classDir.toFile(), "");
         }
         return jarPath;
     }
 
-    private static String obfuscate(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName, String keepRules, String stringReplacements) throws Exception {
+    private static String obfuscate(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName, String keepRules, String stringReplacements, boolean keepServiceNames) throws Exception {
         ClientConfig config = ClientConfig.INSTANCE;
         config.inputJar = inputJar.toString();
         config.outputJar = outputJar.toString();
@@ -231,12 +260,29 @@ class ObfuscatorTest {
         config.randomSplitMethodName = randomSplitMethodName;
         config.keepRules = keepRules;
         config.stringReplacements = stringReplacements;
+        config.keepServiceNames = keepServiceNames;
         new Obfuscator(config, message -> {
         }, value -> {
         }).obfuscate();
         try (JarFile jarFile = new JarFile(outputJar.toFile())) {
             return jarFile.getManifest().getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
         }
+    }
+
+    private static String[] readServiceEntry(Path jarPath) throws Exception {
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            Enumeration<JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                if (!entry.getName().startsWith("META-INF/services/") || entry.isDirectory()) {
+                    continue;
+                }
+                try (InputStream stream = jarFile.getInputStream(entry)) {
+                    return new String[]{entry.getName(), new String(stream.readAllBytes(), StandardCharsets.UTF_8).trim()};
+                }
+            }
+        }
+        return null;
     }
 
     private static int countClasses(Path jarPath) throws Exception {

@@ -43,6 +43,7 @@ public class MainWindow extends JFrame {
     private final JCheckBox splitBox = new JCheckBox("方法拆分", true);
     private final JCheckBox randomClassBox = new JCheckBox("随机类", true);
     private final JCheckBox randomMethodBox = new JCheckBox("随机方法名", true);
+    private final JCheckBox serviceBox = new JCheckBox("保留服务类名", true);
     private final JTextArea logArea = new JTextArea();
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel statusLabel = new JLabel("就绪");
@@ -121,6 +122,7 @@ public class MainWindow extends JFrame {
         optionPanel.add(splitBox);
         optionPanel.add(randomClassBox);
         optionPanel.add(randomMethodBox);
+        optionPanel.add(serviceBox);
 
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -220,6 +222,7 @@ public class MainWindow extends JFrame {
         config.splitMethods = splitBox.isSelected();
         config.randomSplitClass = randomClassBox.isSelected();
         config.randomSplitMethodName = randomMethodBox.isSelected();
+        config.keepServiceNames = serviceBox.isSelected();
 
         logArea.setText("");
         progressBar.setValue(0);
@@ -266,6 +269,7 @@ public class MainWindow extends JFrame {
         splitBox.setEnabled(!busy);
         randomClassBox.setEnabled(!busy);
         randomMethodBox.setEnabled(!busy);
+        serviceBox.setEnabled(!busy);
         inputButton.setEnabled(!busy);
         outputButton.setEnabled(!busy);
         libraryButton.setEnabled(!busy);
