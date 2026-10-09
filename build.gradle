@@ -41,4 +41,11 @@ jar {
                 'Implementation-Version': '1.0'
         )
     }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/MANIFEST.MF'
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+    exclude 'META-INF/INDEX.LIST', 'module-info.class', 'META-INF/versions/**'
 }

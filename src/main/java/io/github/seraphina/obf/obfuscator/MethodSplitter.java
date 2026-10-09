@@ -297,6 +297,10 @@ public class MethodSplitter {
         pushInt(instructions, slot);
         instructions.add(new InsnNode(Opcodes.AALOAD));
         switch (type.getSort()) {
+            case Type.BOOLEAN:
+            case Type.BYTE:
+            case Type.CHAR:
+            case Type.SHORT:
             case Type.INT:
                 instructions.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Integer"));
                 instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false));
@@ -351,6 +355,10 @@ public class MethodSplitter {
 
     private void box(InsnList instructions, Type type) {
         switch (type.getSort()) {
+            case Type.BOOLEAN:
+            case Type.BYTE:
+            case Type.CHAR:
+            case Type.SHORT:
             case Type.INT:
                 instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false));
                 break;

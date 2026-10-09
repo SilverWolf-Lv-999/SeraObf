@@ -19,6 +19,12 @@ public class Main {
             if (args.length >= 4) {
                 config.obfuscateClassPath = args[3];
             }
+            if (args.length >= 5) {
+                config.keepRules = args[4];
+            }
+            if (args.length >= 6) {
+                config.stringReplacements = args[5];
+            }
             new Obfuscator(config, System.out::println, value -> {
             }).obfuscate();
             return;

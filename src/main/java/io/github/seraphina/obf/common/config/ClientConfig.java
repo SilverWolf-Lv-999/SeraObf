@@ -26,6 +26,9 @@ public final class ClientConfig {
 
     public boolean randomSplitMethodName = true;
 
-    private ClientConfig() {
-    }
+    public boolean adaptClassStrings = true;
+
+    public String keepRules = "";
+
+    public String stringReplacements = "";
 }

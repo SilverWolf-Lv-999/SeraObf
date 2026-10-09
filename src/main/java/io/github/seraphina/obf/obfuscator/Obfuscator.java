@@ -6,17 +6,24 @@ import io.github.seraphina.obf.utility.NameUtility;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.InnerClassNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -54,6 +61,15 @@ public class Obfuscator {
     private final Map<String, String> outerNames = new HashMap<>();
     private final Map<String, Integer> classCounters = new HashMap<>();
     private final Set<String> allocatedClassNames = new HashSet<>();
+    private final List<String> keptClassRules = new ArrayList<>();
+    private final List<String> keptMemberRules = new ArrayList<>();
+    private final Map<String, String> stringReplacements = new HashMap<>();
+    private final Set<String> serviceProviders = new HashSet<>();
+    private final Set<String> stringReferencedClasses = new HashSet<>();
+    private final Set<String> reflectiveRewrittenNames = new HashSet<>();
+    private final Set<String> reflectiveNamePins = new HashSet<>();
+    private final Map<String, Set<String>> reflectivePins = new HashMap<>();
+    private final List<ReflectiveString> reflectiveStrings = new ArrayList<>();
     private String classPathPrefix = "";
 
     public Obfuscator(ClientConfig config, Consumer<String> logger, IntConsumer progress) {
@@ -70,14 +86,54 @@ public class Obfuscator {
         Map<String, byte[]> entries = JarUtility.readEntries(inputFile);
         Map<String, ClassNode> classes = readClasses(entries);
         logger.accept("条目 " + entries.size() + " 个, 类 " + classes.size() + " 个");
+        for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+            if (!entry.getKey().startsWith("META-INF/services/")) {
+                continue;
+            }
+            for (String line : new String(entry.getValue(), StandardCharsets.UTF_8).split("[\\r\\n]+")) {
+                String name = line.trim();
+                if (!name.isEmpty() && !name.startsWith("#")) {
+                    serviceProviders.add(NameUtility.internalName(name));
+                }
+            }
+        }
+        if (!serviceProviders.isEmpty()) {
+            logger.accept("服务提供者类: " + serviceProviders.size() + " 个 (保留类名)");
+        }
         logger.accept("混淆类路径: " + (config.renameClasses && !config.obfuscateClassPath.isBlank() ? config.obfuscateClassPath.trim() : "保持原包"));
+        for (String rule : config.keepRules.split("[,;\\s]+")) {
+            if (rule.isEmpty()) {
+                continue;
+            }
+            int hash = rule.indexOf('#');
+            if (hash < 0) {
+                keptClassRules.add(NameUtility.internalName(rule));
+            } else {
+                keptMemberRules.add(NameUtility.internalName(rule.substring(0, hash)) + '#' + rule.substring(hash + 1));
+            }
+        }
+        if (!keptClassRules.isEmpty() || !keptMemberRules.isEmpty()) {
+            logger.accept("保留规则: " + (keptClassRules.size() + keptMemberRules.size()) + " 条");
+        }
+        for (String rule : config.stringReplacements.split("[;\\r\\n]+")) {
+            int index = rule.indexOf('=');
+            if (index > 0) {
+                stringReplacements.put(rule.substring(0, index), rule.substring(index + 1));
+            }
+        }
+        if (!stringReplacements.isEmpty()) {
+            logger.accept("字符串替换: " + stringReplacements.size() + " 条");
+        }
         progress.accept(10);
 
         try (URLClassLoader classLoader = createClassLoader(inputFile)) {
             ClassHierarchy hierarchy = new ClassHierarchy(classes, classLoader);
             buildClassMapping(hierarchy);
             if (config.renameMembers) {
+                collectStringReferencedClasses(hierarchy);
+                collectReflectiveStrings(hierarchy);
                 buildMemberMapping(hierarchy);
+                applyReflectiveStrings();
             }
             int renamedClasses = 0;
             for (Map.Entry<String, String> mapping : classMapping.entrySet()) {
@@ -150,7 +206,7 @@ public class Obfuscator {
         if (existing != null) {
             return existing;
         }
-        if (!config.renameClasses || name.equals("module-info") || NameUtility.simpleName(name).equals("package-info")) {
+        if (!config.renameClasses || name.equals("module-info") || NameUtility.simpleName(name).equals("package-info") || serviceProviders.contains(name) || isKeptClass(name)) {
             classMapping.put(name, name);
             return name;
         }
@@ -283,6 +339,14 @@ public class Obfuscator {
     }
 
     private boolean isPinnedMember(ClassNode node, String name, String descriptor, int access, Set<String> externalMembers, boolean missingAncestor) {
+        if (isKeptMember(node.name, name)) {
+            return true;
+        }
+        Set<String> pinnedNames = reflectivePins.get(node.name);
+        if (stringReferencedClasses.contains(node.name) && !reflectiveRewrittenNames.contains(name)
+                || reflectiveNamePins.contains(name) || pinnedNames != null && pinnedNames.contains(name)) {
+            return true;
+        }
         if (name.charAt(0) == '<' || (access & Opcodes.ACC_NATIVE) != 0) {
             return true;
         }
@@ -307,6 +371,200 @@ public class Obfuscator {
             return true;
         }
         return missingAncestor && (access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) != 0 && (access & Opcodes.ACC_STATIC) == 0;
+    }
+
+    private boolean isKeptClass(String internalName) {
+        for (String rule : keptClassRules) {
+            if (rule.endsWith("*") ? internalName.startsWith(rule.substring(0, rule.length() - 1)) : rule.equals(internalName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isKeptMember(String internalOwner, String memberName) {
+        for (String rule : keptMemberRules) {
+            int hash = rule.lastIndexOf('#');
+            if (!rule.substring(hash + 1).equals(memberName)) {
+                continue;
+            }
+            String owner = rule.substring(0, hash);
+            if (owner.endsWith("*") ? internalOwner.startsWith(owner.substring(0, owner.length() - 1)) : owner.equals(internalOwner)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void collectReflectiveStrings(ClassHierarchy hierarchy) {
+        for (ClassNode node : hierarchy.getClasses().values()) {
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                    if (!(instruction instanceof MethodInsnNode)) {
+                        continue;
+                    }
+                    MethodInsnNode call = (MethodInsnNode) instruction;
+                    if (!call.owner.equals("java/lang/Class")) {
+                        continue;
+                    }
+                    boolean methodLookup = call.name.equals("getMethod") || call.name.equals("getDeclaredMethod");
+                    if (!methodLookup && !call.name.equals("getField") && !call.name.equals("getDeclaredField")) {
+                        continue;
+                    }
+                    LdcInsnNode nameNode = null;
+                    String target = null;
+                    int steps = 0;
+                    for (AbstractInsnNode previous = call.getPrevious(); previous != null && steps < 40; previous = previous.getPrevious()) {
+                        if (previous instanceof LabelNode || previous instanceof LineNumberNode || previous instanceof FrameNode) {
+                            continue;
+                        }
+                        steps++;
+                        if (previous instanceof VarInsnNode) {
+                            break;
+                        }
+                        if (!(previous instanceof LdcInsnNode)) {
+                            if (previous instanceof InsnNode || previous instanceof TypeInsnNode || previous instanceof IntInsnNode) {
+                                continue;
+                            }
+                            break;
+                        }
+                        Object constant = ((LdcInsnNode) previous).cst;
+                        if (constant instanceof String) {
+                            if (nameNode == null) {
+                                nameNode = (LdcInsnNode) previous;
+                            }
+                        } else if (constant instanceof Type && nameNode != null && target == null && ((Type) constant).getSort() == Type.OBJECT) {
+                            target = ((Type) constant).getInternalName();
+                        }
+                    }
+                    if (nameNode == null || ((String) nameNode.cst).isEmpty()) {
+                        continue;
+                    }
+                    String name = (String) nameNode.cst;
+                    if (target == null || !hierarchy.getClasses().containsKey(target)) {
+                        reflectiveNamePins.add(name);
+                        continue;
+                    }
+                    List<String> keys = memberKeys(hierarchy, target, name, methodLookup);
+                    if (keys.size() == 1) {
+                        ReflectiveString rewrite = new ReflectiveString(nameNode, keys.get(0), methodLookup);
+                        reflectiveStrings.add(rewrite);
+                        reflectiveRewrittenNames.add(name);
+                    } else if (keys.size() > 1) {
+                        for (String key : keys) {
+                            reflectivePins.computeIfAbsent(key.substring(0, key.indexOf('#')), key2 -> new HashSet<>()).add(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void collectStringReferencedClasses(ClassHierarchy hierarchy) {
+        for (ClassNode node : hierarchy.getClasses().values()) {
+            for (FieldNode field : node.fields) {
+                if (field.value instanceof String) {
+                    addStringReference(hierarchy, (String) field.value);
+                }
+            }
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                    if (!(instruction instanceof LdcInsnNode)) {
+                        continue;
+                    }
+                    Object constant = ((LdcInsnNode) instruction).cst;
+                    if (constant instanceof String) {
+                        addStringReference(hierarchy, (String) constant);
+                    } else if (constant instanceof Type && ((Type) constant).getSort() == Type.OBJECT && buildsClassName(instruction)) {
+                        stringReferencedClasses.add(((Type) constant).getInternalName());
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean buildsClassName(AbstractInsnNode instruction) {
+        int steps = 0;
+        for (AbstractInsnNode next = instruction.getNext(); next != null && steps < 4; next = next.getNext(), steps++) {
+            if (next instanceof LabelNode || next instanceof LineNumberNode || next instanceof FrameNode) {
+                continue;
+            }
+            if (!(next instanceof MethodInsnNode)) {
+                continue;
+            }
+            MethodInsnNode call = (MethodInsnNode) next;
+            return call.owner.equals("java/lang/Class") && call.name.equals("getName")
+                    || call.owner.equals("org/objectweb/asm/Type") && (call.name.equals("getDescriptor") || call.name.equals("getInternalName"));
+        }
+        return false;
+    }
+
+    private void addStringReference(ClassHierarchy hierarchy, String text) {
+        if (hierarchy.getClasses().containsKey(text)) {
+            stringReferencedClasses.add(text);
+            return;
+        }
+        String internalName = text.replace('.', '/');
+        if (hierarchy.getClasses().containsKey(internalName)) {
+            stringReferencedClasses.add(internalName);
+        }
+    }
+
+    private List<String> memberKeys(ClassHierarchy hierarchy, String owner, String name, boolean method) {
+        List<String> keys = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(owner);
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            ClassNode node = hierarchy.getClasses().get(current);
+            if (node == null) {
+                continue;
+            }
+            if (method) {
+                for (MethodNode candidate : node.methods) {
+                    if (candidate.name.equals(name)) {
+                        keys.add(current + '#' + name + candidate.desc);
+                    }
+                }
+            } else {
+                for (FieldNode candidate : node.fields) {
+                    if (candidate.name.equals(name)) {
+                        keys.add(current + '#' + name + candidate.desc);
+                    }
+                }
+            }
+            if (node.superName != null) {
+                queue.add(node.superName);
+            }
+            queue.addAll(node.interfaces);
+        }
+        return keys;
+    }
+
+    private void applyReflectiveStrings() {
+        for (ReflectiveString reflective : reflectiveStrings) {
+            String mapped = (reflective.method ? methodMapping : fieldMapping).get(reflective.key);
+            if (mapped != null) {
+                reflective.node.cst = mapped;
+            }
+        }
+    }
+
+    private static class ReflectiveString {
+
+        private final LdcInsnNode node;
+        private final String key;
+        private final boolean method;
+
+        private ReflectiveString(LdcInsnNode node, String key, boolean method) {
+            this.node = node;
+            this.key = key;
+            this.method = method;
+        }
     }
 
     private void writeJar(Map<String, byte[]> entries, Map<String, ClassNode> classes, NameRemapper remapper, ClassLoader classLoader, File outputFile) throws IOException {
@@ -425,14 +683,16 @@ public class Obfuscator {
         ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         boolean interfaceOwner = (node.access & Opcodes.ACC_INTERFACE) != 0;
         int majorVersion = node.version & 0xFFFF;
-        if (!config.encryptStrings || (interfaceOwner && majorVersion < Opcodes.V1_8)) {
+        boolean encrypt = config.encryptStrings && !(interfaceOwner && majorVersion < Opcodes.V1_8);
+        if (!encrypt && !config.adaptClassStrings && stringReplacements.isEmpty()) {
             node.accept(writer);
             return writer.toByteArray();
         }
         int methodAccess = interfaceOwner && majorVersion < Opcodes.V9
                 ? Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC
                 : Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        node.accept(new StringEncryptor(writer, node.name, decryptMethodName(node), methodAccess, interfaceOwner, node.version));
+        String decryptName = encrypt ? decryptMethodName(node) : null;
+        node.accept(new StringEncryptor(writer, node.name, decryptName, methodAccess, interfaceOwner, node.version, encrypt, classMapping, stringReplacements));
         return writer.toByteArray();
     }
 

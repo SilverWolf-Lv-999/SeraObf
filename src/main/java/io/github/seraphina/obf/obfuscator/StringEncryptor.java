@@ -1,5 +1,6 @@
 package io.github.seraphina.obf.obfuscator;
 
+import io.github.seraphina.obf.utility.NameUtility;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -17,6 +18,7 @@ import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 public class StringEncryptor extends ClassVisitor {
 
@@ -25,21 +27,32 @@ public class StringEncryptor extends ClassVisitor {
     private final int methodAccess;
     private final boolean interfaceOwner;
     private final boolean framesRequired;
+    private final boolean encrypt;
+    private final Map<String, String> classMapping;
+    private final Map<String, String> replacements;
     private boolean used;
     private int literalIndex;
 
-    public StringEncryptor(ClassVisitor classVisitor, String owner, String decryptName, int methodAccess, boolean interfaceOwner, int classVersion) {
+    public StringEncryptor(ClassVisitor classVisitor, String owner, String decryptName, int methodAccess, boolean interfaceOwner, int classVersion, boolean encrypt, Map<String, String> classMapping, Map<String, String> replacements) {
         super(Opcodes.ASM9, classVisitor);
         this.owner = owner;
         this.decryptName = decryptName;
         this.methodAccess = methodAccess;
         this.interfaceOwner = interfaceOwner;
         this.framesRequired = (classVersion & 0xFFFF) >= Opcodes.V1_6;
+        this.encrypt = encrypt;
+        this.classMapping = classMapping;
+        this.replacements = replacements;
     }
 
     public void emit(MethodVisitor methodVisitor, String text) {
+        String value = adapt(replacements.getOrDefault(text, text));
+        if (!encrypt) {
+            methodVisitor.visitLdcInsn(value);
+            return;
+        }
         used = true;
-        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         int key = (literalIndex++ * 0x1F + 0x5F) & 0xFF;
         byte[] encoded = new byte[bytes.length];
         for (int index = 0; index < bytes.length; index++) {
@@ -48,6 +61,15 @@ public class StringEncryptor extends ClassVisitor {
         methodVisitor.visitLdcInsn(new String(encoded, StandardCharsets.ISO_8859_1));
         methodVisitor.visitLdcInsn(key);
         methodVisitor.visitMethodInsn(Opcodes.INVOKESTATIC, owner, decryptName, "(Ljava/lang/String;I)Ljava/lang/String;", interfaceOwner);
+    }
+
+    private String adapt(String text) {
+        String internalName = text.replace('.', '/');
+        String mapped = classMapping.get(internalName);
+        if (mapped == null || mapped.equals(internalName)) {
+            return text;
+        }
+        return NameUtility.binaryName(mapped);
     }
 
     @Override

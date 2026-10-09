@@ -54,6 +54,32 @@ class ObfuscatorTest {
             "        return new Nested().text();",
             "    }",
             "",
+            "    public static String selfName() {",
+            "        try {",
+            "            return Class.forName(\"demo.Sample\").getName();",
+            "        } catch (ClassNotFoundException exception) {",
+            "            return \"missing\";",
+            "        }",
+            "    }",
+            "",
+            "    public static int mixed(boolean flag, byte low, char letter, short count) {",
+            "        int result = low;",
+            "        result += letter;",
+            "        result += count;",
+            "        result += Boolean.compare(flag, false);",
+            "        result += 1;",
+            "        result += 2;",
+            "        return result;",
+            "    }",
+            "",
+            "    public static String reflectName() {",
+            "        try {",
+            "            return Nested.class.getDeclaredMethod(\"text\").getName();",
+            "        } catch (ReflectiveOperationException exception) {",
+            "            return \"missing\";",
+            "        }",
+            "    }",
+            "",
             "    public static void main(String[] args) {",
             "        Sample sample = new Sample();",
             "        System.out.println(sample.value());",
@@ -61,6 +87,9 @@ class ObfuscatorTest {
             "        System.out.println(sample.greet());",
             "        System.out.println(nested());",
             "        System.out.println(Kind.FIRST);",
+            "        System.out.println(selfName());",
+            "        System.out.println(\"mixed=\" + mixed(true, (byte) 1, 'A', (short) 2));",
+            "        System.out.println(\"reflect=\" + reflectName());",
             "    }",
             "",
             "    static class Nested {",
@@ -112,16 +141,17 @@ class ObfuscatorTest {
         Path inputJar = compileSample(workDir);
 
         Path outputJar = workDir.resolve("output.jar");
-        String mainClass = obfuscate(inputJar, outputJar, "obf.myapp.random", true, true, true);
+        String mainClass = obfuscate(inputJar, outputJar, "obf.myapp.random", true, true, true, "", "");
         assertTrue(mainClass.startsWith("obf.myapp.random."), mainClass);
         assertTrue(countClasses(outputJar) > countClasses(inputJar));
+        String rsrcMainClass;
         try (JarFile jarFile = new JarFile(outputJar.toFile())) {
             JarEntry entry = jarFile.getJarEntry(mainClass.replace('.', '/') + ".class");
             String classText;
             try (InputStream stream = jarFile.getInputStream(entry)) {
                 classText = new String(stream.readAllBytes(), StandardCharsets.ISO_8859_1);
             }
-            String rsrcMainClass = jarFile.getManifest().getMainAttributes().getValue("Rsrc-Main-Class");
+            rsrcMainClass = jarFile.getManifest().getMainAttributes().getValue("Rsrc-Main-Class");
             assertTrue(rsrcMainClass.startsWith("obf.myapp.random."), rsrcMainClass);
             assertNotEquals(mainClass, rsrcMainClass);
             assertNotNull(jarFile.getJarEntry(rsrcMainClass.replace('.', '/') + ".class"));
@@ -133,18 +163,22 @@ class ObfuscatorTest {
         assertTrue(processOutput.contains("lambda-value"), processOutput);
         assertTrue(processOutput.contains("nested-value"), processOutput);
         assertTrue(processOutput.contains("FIRST"), processOutput);
+        assertTrue(processOutput.contains("mixed=72"), processOutput);
+        assertFalse(processOutput.contains("reflect=missing"), processOutput);
+        assertFalse(processOutput.contains("reflect=text"), processOutput);
+        assertTrue(processOutput.contains(rsrcMainClass), processOutput);
 
         Path keptJar = workDir.resolve("kept.jar");
-        String keptMainClass = obfuscate(inputJar, keptJar, "", true, true, true);
+        String keptMainClass = obfuscate(inputJar, keptJar, "", true, true, true, "", "");
         assertTrue(keptMainClass.startsWith("demo."), keptMainClass);
         assertTrue(runJar(keptJar).contains("prefix-value-hidden-value"));
 
         Path plainJar = workDir.resolve("plain.jar");
-        obfuscate(inputJar, plainJar, "obf.myapp.random", false, true, true);
+        obfuscate(inputJar, plainJar, "obf.myapp.random", false, true, true, "", "");
         assertEquals(countClasses(inputJar), countClasses(plainJar));
 
         Path inlineJar = workDir.resolve("inline.jar");
-        String inlineMainClass = obfuscate(inputJar, inlineJar, "obf.myapp.random", true, false, false);
+        String inlineMainClass = obfuscate(inputJar, inlineJar, "obf.myapp.random", true, false, false, "", "");
         assertEquals(countClasses(inputJar), countClasses(inlineJar));
         try (JarFile jarFile = new JarFile(inlineJar.toFile())) {
             byte[] classBytes;
@@ -154,6 +188,10 @@ class ObfuscatorTest {
             assertTrue(new String(classBytes, StandardCharsets.ISO_8859_1).contains("$split1"));
         }
         assertTrue(runJar(inlineJar).contains("prefix-value-hidden-value"));
+
+        Path replacedJar = workDir.resolve("replaced.jar");
+        obfuscate(inputJar, replacedJar, "", true, true, true, "", "hidden-value=patched-value");
+        assertTrue(runJar(replacedJar).contains("patched-value"));
     }
 
     private static Path compileSample(Path workDir) throws Exception {
@@ -178,7 +216,7 @@ class ObfuscatorTest {
         return jarPath;
     }
 
-    private static String obfuscate(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName) throws Exception {
+    private static String obfuscate(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName, String keepRules, String stringReplacements) throws Exception {
         ClientConfig config = ClientConfig.INSTANCE;
         config.inputJar = inputJar.toString();
         config.outputJar = outputJar.toString();
@@ -191,6 +229,8 @@ class ObfuscatorTest {
         config.splitMethods = splitMethods;
         config.randomSplitClass = randomSplitClass;
         config.randomSplitMethodName = randomSplitMethodName;
+        config.keepRules = keepRules;
+        config.stringReplacements = stringReplacements;
         new Obfuscator(config, message -> {
         }, value -> {
         }).obfuscate();
