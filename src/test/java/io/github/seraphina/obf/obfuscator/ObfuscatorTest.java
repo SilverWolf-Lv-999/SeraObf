@@ -3,14 +3,21 @@ package io.github.seraphina.obf.obfuscator;
 import io.github.seraphina.obf.common.config.ClientConfig;
 import io.github.seraphina.obf.common.config.CommonConfig;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.util.CheckClassAdapter;
 import org.junit.jupiter.api.Test;
 
 import javax.tools.ToolProvider;
 import java.io.File;
 import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ObfuscatorTest {
@@ -156,6 +164,65 @@ class ObfuscatorTest {
             "    }",
             "}",
             "");
+
+    @Test
+    void stripsSignaturesAndRebuildsFrames() throws Exception {
+        Path workDir = Files.createTempDirectory("seraobf-signature");
+        Path inputJar = compileSample(workDir);
+        Path outputJar = workDir.resolve("signature.jar");
+        ClientConfig config = prepare(inputJar, outputJar, "obf.signature.probe", true, true, true, "", "", true);
+        config.dictionarySeed = 20261009L;
+        obfuscate(config);
+
+        int signatures = 0;
+        for (String text : classEntries(inputJar).values()) {
+            if (text.contains("Ljava/util/function/Supplier<")) {
+                signatures++;
+            }
+        }
+        assertTrue(signatures > 0);
+
+        int frames = 0;
+        for (Map.Entry<String, String> entry : classEntries(outputJar).entrySet()) {
+            assertFalse(entry.getValue().contains("Ljava/util/function/Supplier<"), entry.getKey());
+            ClassNode node = new ClassNode();
+            new ClassReader(entry.getValue().getBytes(StandardCharsets.ISO_8859_1)).accept(node, 0);
+            assertNull(node.signature);
+            for (FieldNode field : node.fields) {
+                assertNull(field.signature);
+            }
+            for (MethodNode method : node.methods) {
+                assertNull(method.signature);
+                for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                    if (instruction instanceof FrameNode) {
+                        frames++;
+                    }
+                }
+            }
+        }
+        assertTrue(frames > 0);
+        try (URLClassLoader classLoader = new URLClassLoader(new URL[]{outputJar.toUri().toURL()}, getClass().getClassLoader())) {
+            for (Map.Entry<String, String> entry : classEntries(outputJar).entrySet()) {
+                StringWriter verification = new StringWriter();
+                CheckClassAdapter.verify(new ClassReader(entry.getValue().getBytes(StandardCharsets.ISO_8859_1)), classLoader, false, new PrintWriter(verification));
+                assertTrue(verification.toString().isBlank(), entry.getKey() + ' ' + verification);
+            }
+        }
+        assertTrue(runJar(outputJar).contains("prefix-value-hidden-value"));
+
+        Path plainJar = workDir.resolve("signature-plain.jar");
+        ClientConfig plain = prepare(inputJar, plainJar, "obf.signature.probe", false, false, false, "", "", true);
+        plain.dictionarySeed = 20261009L;
+        plain.stripSignatures = false;
+        plain.rebuildStackMapFrames = false;
+        obfuscate(plain);
+        boolean kept = false;
+        for (String text : classEntries(plainJar).values()) {
+            kept |= text.contains("Ljava/util/function/Supplier<");
+        }
+        assertTrue(kept);
+        assertTrue(runJar(plainJar).contains("prefix-value-hidden-value"));
+    }
 
     @Test
     void renamesWithDictionaries() throws Exception {
@@ -349,6 +416,8 @@ class ObfuscatorTest {
         config.dictionarySeed = 0L;
         config.encryptStrings = true;
         config.stripDebugInfo = true;
+        config.stripSignatures = true;
+        config.rebuildStackMapFrames = true;
         config.splitMethods = splitMethods;
         config.randomSplitClass = randomSplitClass;
         config.randomSplitMethodName = randomSplitMethodName;

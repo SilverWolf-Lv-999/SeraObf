@@ -37,6 +37,12 @@ public class Main {
             if (args.length >= 10) {
                 config.dictionarySeed = Long.parseLong(args[9]);
             }
+            if (args.length >= 11) {
+                config.stripSignatures = Boolean.parseBoolean(args[10]);
+            }
+            if (args.length >= 12) {
+                config.rebuildStackMapFrames = Boolean.parseBoolean(args[11]);
+            }
             new Obfuscator(config, System.out::println, value -> {
             }).obfuscate();
             return;

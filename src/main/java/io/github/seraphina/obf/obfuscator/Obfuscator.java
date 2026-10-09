@@ -22,9 +22,11 @@ import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
+import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
+import org.objectweb.asm.tree.RecordComponentNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -76,7 +78,10 @@ public class Obfuscator {
     private final List<ReflectiveString> reflectiveStrings = new ArrayList<>();
     private final Map<String, String> classGroups = new HashMap<>();
     private final Map<String, String> classGroupPaths = new HashMap<>();
+    private final Map<String, String> commonSuperCache = new HashMap<>();
     private NameAllocator nameAllocator;
+    private ClassLoader frameClassLoader;
+    private Map<String, ClassNode> frameClasses;
     private String classPathPrefix = "";
 
     public Obfuscator(ClientConfig config, Consumer<String> logger, IntConsumer progress) {
@@ -759,6 +764,9 @@ public class Obfuscator {
         Map<String, ClassNode> remappedClasses = new LinkedHashMap<>();
         Map<String, ClassNode> originalToRemapped = new HashMap<>();
         Map<String, String> originalNames = new HashMap<>();
+        frameClassLoader = classLoader;
+        frameClasses = remappedClasses;
+        commonSuperCache.clear();
         for (ClassNode node : classes.values()) {
             ClassNode remapped = remapClass(node, remapper);
             remappedClasses.put(remapped.name, remapped);
@@ -770,6 +778,9 @@ public class Obfuscator {
             MethodSplitter splitter = new MethodSplitter(config, classes, remappedClasses, classMapping, originalNames, classLoader, nameAllocator, allocatedClassNames);
             splitter.splitAll();
             generatedClasses.addAll(splitter.getGeneratedClasses());
+            for (ClassNode generated : generatedClasses) {
+                frameClasses.put(generated.name, generated);
+            }
             logger.accept("方法拆分 " + splitter.getSplitMethodCount() + " 个方法, 生成类 " + generatedClasses.size() + " 个");
         }
         Manifest manifest = JarUtility.readManifest(entries);
@@ -868,7 +879,15 @@ public class Obfuscator {
     }
 
     private byte[] writeClass(ClassNode node) {
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        if (config.stripSignatures) {
+            stripSignatures(node);
+        }
+        boolean rebuildFrames = config.rebuildStackMapFrames && (node.version & 0xFFFF) >= Opcodes.V1_6;
+        if (rebuildFrames) {
+            stripStackMapFrames(node);
+            frameClasses.putIfAbsent(node.name, node);
+        }
+        ClassWriter writer = rebuildFrames ? new FrameClassWriter(frameClassLoader, frameClasses, commonSuperCache) : new ClassWriter(ClassWriter.COMPUTE_MAXS);
         boolean interfaceOwner = (node.access & Opcodes.ACC_INTERFACE) != 0;
         int majorVersion = node.version & 0xFFFF;
         boolean encrypt = config.encryptStrings && !(interfaceOwner && majorVersion < Opcodes.V1_8);
@@ -907,6 +926,40 @@ public class Obfuscator {
             for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; ) {
                 AbstractInsnNode next = instruction.getNext();
                 if (instruction instanceof LineNumberNode) {
+                    method.instructions.remove(instruction);
+                }
+                instruction = next;
+            }
+        }
+    }
+
+    private void stripSignatures(ClassNode node) {
+        node.signature = null;
+        for (FieldNode field : node.fields) {
+            field.signature = null;
+        }
+        for (MethodNode method : node.methods) {
+            method.signature = null;
+            if (method.localVariables == null) {
+                continue;
+            }
+            for (LocalVariableNode variable : method.localVariables) {
+                variable.signature = null;
+            }
+        }
+        if (node.recordComponents == null) {
+            return;
+        }
+        for (RecordComponentNode component : node.recordComponents) {
+            component.signature = null;
+        }
+    }
+
+    private void stripStackMapFrames(ClassNode node) {
+        for (MethodNode method : node.methods) {
+            for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; ) {
+                AbstractInsnNode next = instruction.getNext();
+                if (instruction instanceof FrameNode) {
                     method.instructions.remove(instruction);
                 }
                 instruction = next;

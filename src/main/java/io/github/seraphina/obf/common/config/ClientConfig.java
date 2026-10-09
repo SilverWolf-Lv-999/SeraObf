@@ -26,6 +26,10 @@ public final class ClientConfig {
 
     public boolean stripDebugInfo = true;
 
+    public boolean stripSignatures = true;
+
+    public boolean rebuildStackMapFrames = true;
+
     public boolean splitMethods = true;
 
     public boolean randomSplitClass = true;

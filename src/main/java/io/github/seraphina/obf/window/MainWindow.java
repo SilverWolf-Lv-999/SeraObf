@@ -47,6 +47,8 @@ public class MainWindow extends JFrame {
     private final JCheckBox serviceBox = new JCheckBox("保留服务类名", true);
     private final JCheckBox classPathBox = new JCheckBox("混淆类路径", true);
     private final JCheckBox subPathBox = new JCheckBox("子路径拆分", false);
+    private final JCheckBox signatureBox = new JCheckBox("删除泛型签名", true);
+    private final JCheckBox framesBox = new JCheckBox("重建栈帧", true);
     private final JTextArea logArea = new JTextArea();
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel statusLabel = new JLabel("就绪");
@@ -125,7 +127,7 @@ public class MainWindow extends JFrame {
         outputButton.addActionListener(event -> selectOutputJar());
         libraryButton.addActionListener(event -> selectLibraryJars());
 
-        JPanel optionPanel = new JPanel(new GridLayout(2, 5, 4, 4));
+        JPanel optionPanel = new JPanel(new GridLayout(2, 6, 4, 4));
         optionPanel.setBorder(new TitledBorder("混淆选项"));
         optionPanel.add(classBox);
         optionPanel.add(memberBox);
@@ -137,6 +139,8 @@ public class MainWindow extends JFrame {
         optionPanel.add(serviceBox);
         optionPanel.add(classPathBox);
         optionPanel.add(subPathBox);
+        optionPanel.add(signatureBox);
+        optionPanel.add(framesBox);
         classPathBox.addActionListener(event -> classPathField.setEnabled(classPathBox.isSelected()));
 
         logArea.setEditable(false);
@@ -245,6 +249,8 @@ public class MainWindow extends JFrame {
         config.keepServiceNames = serviceBox.isSelected();
         config.obfuscateClassPathEnabled = classPathBox.isSelected();
         config.splitSubPath = subPathBox.isSelected();
+        config.stripSignatures = signatureBox.isSelected();
+        config.rebuildStackMapFrames = framesBox.isSelected();
 
         logArea.setText("");
         progressBar.setValue(0);
@@ -295,6 +301,8 @@ public class MainWindow extends JFrame {
         serviceBox.setEnabled(!busy);
         classPathBox.setEnabled(!busy);
         subPathBox.setEnabled(!busy);
+        signatureBox.setEnabled(!busy);
+        framesBox.setEnabled(!busy);
         inputButton.setEnabled(!busy);
         outputButton.setEnabled(!busy);
         libraryButton.setEnabled(!busy);
