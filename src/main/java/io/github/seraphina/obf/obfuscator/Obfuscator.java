@@ -841,41 +841,10 @@ public class Obfuscator {
     private ClassNode remapClass(ClassNode node, NameRemapper remapper) {
         ClassNode remapped = new ClassNode();
         node.accept(new ClassRemapper(remapped, remapper));
-        if (config.encryptStrings) {
-            encryptConstantValues(remapped);
-        }
         if (config.stripDebugInfo) {
             stripDebugInfo(remapped);
         }
         return remapped;
-    }
-
-    private void encryptConstantValues(ClassNode node) {
-        for (FieldNode field : node.fields) {
-            if (!(field.value instanceof String)) {
-                continue;
-            }
-            String constant = (String) field.value;
-            field.value = null;
-            if ((field.access & Opcodes.ACC_STATIC) == 0) {
-                continue;
-            }
-            MethodNode initializer = null;
-            for (MethodNode method : node.methods) {
-                if (method.name.equals("<clinit>") && method.desc.equals("()V")) {
-                    initializer = method;
-                }
-            }
-            if (initializer == null) {
-                initializer = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
-                initializer.instructions.add(new InsnNode(Opcodes.RETURN));
-                node.methods.add(initializer);
-            }
-            InsnList instructions = new InsnList();
-            instructions.add(new LdcInsnNode(constant));
-            instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, field.name, field.desc));
-            initializer.instructions.insert(instructions);
-        }
     }
 
     private byte[] writeClass(ClassNode node) {
@@ -887,32 +856,12 @@ public class Obfuscator {
             stripStackMapFrames(node);
             frameClasses.putIfAbsent(node.name, node);
         }
+        if (config.encryptStrings || config.adaptClassStrings || !stringReplacements.isEmpty()) {
+            new StringRewriter(config, node, classMapping, stringReplacements, nameAllocator).rewrite();
+        }
         ClassWriter writer = rebuildFrames ? new FrameClassWriter(frameClassLoader, frameClasses, commonSuperCache) : new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        boolean interfaceOwner = (node.access & Opcodes.ACC_INTERFACE) != 0;
-        int majorVersion = node.version & 0xFFFF;
-        boolean encrypt = config.encryptStrings && !(interfaceOwner && majorVersion < Opcodes.V1_8);
-        if (!encrypt && !config.adaptClassStrings && stringReplacements.isEmpty()) {
-            node.accept(writer);
-            return writer.toByteArray();
-        }
-        int methodAccess = interfaceOwner && majorVersion < Opcodes.V9
-                ? Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC
-                : Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        String decryptName = encrypt ? decryptMethodName(node) : null;
-        node.accept(new StringEncryptor(writer, node.name, decryptName, methodAccess, interfaceOwner, node.version, encrypt, classMapping, stringReplacements));
+        node.accept(writer);
         return writer.toByteArray();
-    }
-
-    private String decryptMethodName(ClassNode node) {
-        Set<String> names = new HashSet<>();
-        for (MethodNode method : node.methods) {
-            names.add(method.name);
-        }
-        String name;
-        do {
-            name = nameAllocator.nextMethodName();
-        } while (names.contains(name));
-        return name;
     }
 
     private void stripDebugInfo(ClassNode node) {

@@ -3,10 +3,14 @@ package io.github.seraphina.obf.obfuscator;
 import io.github.seraphina.obf.common.config.ClientConfig;
 import io.github.seraphina.obf.common.config.CommonConfig;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.util.CheckClassAdapter;
 import org.junit.jupiter.api.Test;
@@ -50,6 +54,8 @@ class ObfuscatorTest {
             "import java.util.function.Supplier;",
             "",
             "public class Sample implements Runnable, Greeter {",
+            "    public static final String LABEL = \"label-value\";",
+            "",
             "    private final String value = \"hidden-value\";",
             "",
             "    @Override",
@@ -109,6 +115,7 @@ class ObfuscatorTest {
             "        System.out.println(selfName());",
             "        System.out.println(\"mixed=\" + mixed(true, (byte) 1, 'A', (short) 2));",
             "        System.out.println(\"reflect=\" + reflectName());",
+            "        System.out.println(LABEL);",
             "    }",
             "",
             "    static class Nested {",
@@ -201,13 +208,7 @@ class ObfuscatorTest {
             }
         }
         assertTrue(frames > 0);
-        try (URLClassLoader classLoader = new URLClassLoader(new URL[]{outputJar.toUri().toURL()}, getClass().getClassLoader())) {
-            for (Map.Entry<String, String> entry : classEntries(outputJar).entrySet()) {
-                StringWriter verification = new StringWriter();
-                CheckClassAdapter.verify(new ClassReader(entry.getValue().getBytes(StandardCharsets.ISO_8859_1)), classLoader, false, new PrintWriter(verification));
-                assertTrue(verification.toString().isBlank(), entry.getKey() + ' ' + verification);
-            }
-        }
+        verifyClasses(outputJar);
         assertTrue(runJar(outputJar).contains("prefix-value-hidden-value"));
 
         Path plainJar = workDir.resolve("signature-plain.jar");
@@ -221,7 +222,56 @@ class ObfuscatorTest {
             kept |= text.contains("Ljava/util/function/Supplier<");
         }
         assertTrue(kept);
+        verifyClasses(plainJar);
         assertTrue(runJar(plainJar).contains("prefix-value-hidden-value"));
+    }
+
+    @Test
+    void storesStringCiphertextInIntArrays() throws Exception {
+        Path workDir = Files.createTempDirectory("seraobf-cipher");
+        Path inputJar = compileSample(workDir);
+        Path outputJar = workDir.resolve("cipher.jar");
+        ClientConfig config = prepare(inputJar, outputJar, "obf.cipher.probe", true, true, true, "", "", true);
+        config.dictionarySeed = 20261009L;
+        obfuscate(config);
+
+        int arrays = 0;
+        for (Map.Entry<String, String> entry : classEntries(outputJar).entrySet()) {
+            for (String text : new String[]{"hidden-value", "lambda-value", "nested-value", "prefix-value", "label-value", "provider"}) {
+                assertFalse(entry.getValue().contains(text), entry.getKey() + ' ' + text);
+            }
+            ClassNode node = new ClassNode();
+            new ClassReader(entry.getValue().getBytes(StandardCharsets.ISO_8859_1)).accept(node, 0);
+            boolean array = false;
+            for (FieldNode field : node.fields) {
+                array |= field.desc.equals("[I") && (field.access & Opcodes.ACC_STATIC) != 0;
+            }
+            boolean filled = false;
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                    if (instruction instanceof LdcInsnNode) {
+                        assertFalse(((LdcInsnNode) instruction).cst instanceof String, entry.getKey());
+                    }
+                    if (instruction instanceof MethodInsnNode) {
+                        MethodInsnNode call = (MethodInsnNode) instruction;
+                        assertFalse(call.owner.equals("java/lang/String") && call.name.equals("intern"), entry.getKey());
+                    }
+                    if (instruction instanceof IntInsnNode && instruction.getOpcode() == Opcodes.NEWARRAY && ((IntInsnNode) instruction).operand == Opcodes.T_INT) {
+                        arrays++;
+                        filled |= method.name.equals("<clinit>");
+                    }
+                }
+            }
+            if (array) {
+                assertTrue(filled, entry.getKey());
+            }
+        }
+        assertTrue(arrays > 0);
+        verifyClasses(outputJar);
+        String processOutput = runJar(outputJar);
+        assertTrue(processOutput.contains("label-value"), processOutput);
+        assertTrue(processOutput.contains("prefix-value-hidden-value"), processOutput);
+        assertTrue(processOutput.contains("nested-value"), processOutput);
     }
 
     @Test
@@ -317,6 +367,7 @@ class ObfuscatorTest {
         assertTrue(processOutput.contains("nested-value"), processOutput);
         assertTrue(processOutput.contains("FIRST"), processOutput);
         assertTrue(processOutput.contains("mixed=72"), processOutput);
+        assertTrue(processOutput.contains("label-value"), processOutput);
         assertFalse(processOutput.contains("reflect=missing"), processOutput);
         assertFalse(processOutput.contains("reflect=text"), processOutput);
         assertTrue(processOutput.contains(rsrcMainClass), processOutput);
@@ -535,6 +586,16 @@ class ObfuscatorTest {
         assertTrue(process.waitFor(60, TimeUnit.SECONDS), output);
         assertEquals(0, process.exitValue(), output);
         return output;
+    }
+
+    private static void verifyClasses(Path jarPath) throws Exception {
+        try (URLClassLoader classLoader = new URLClassLoader(new URL[]{jarPath.toUri().toURL()}, ObfuscatorTest.class.getClassLoader())) {
+            for (Map.Entry<String, String> entry : classEntries(jarPath).entrySet()) {
+                StringWriter verification = new StringWriter();
+                CheckClassAdapter.verify(new ClassReader(entry.getValue().getBytes(StandardCharsets.ISO_8859_1)), classLoader, false, new PrintWriter(verification));
+                assertTrue(verification.toString().isBlank(), entry.getKey() + ' ' + verification);
+            }
+        }
     }
 
     private static void writeEntries(JarOutputStream jarStream, File directory, String prefix) throws Exception {
