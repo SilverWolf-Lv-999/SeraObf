@@ -1,0 +1,31 @@
+package io.github.seraphina.obf.common.config;
+
+public final class ClientConfig {
+
+    public static final ClientConfig INSTANCE = new ClientConfig();
+
+    public String inputJar = "";
+
+    public String outputJar = "";
+
+    public String libraryJars = "";
+
+    public String obfuscateClassPath = "obf.myapp.random";
+
+    public boolean renameClasses = true;
+
+    public boolean renameMembers = true;
+
+    public boolean encryptStrings = true;
+
+    public boolean stripDebugInfo = true;
+
+    public boolean splitMethods = true;
+
+    public boolean randomSplitClass = true;
+
+    public boolean randomSplitMethodName = true;
+
+    private ClientConfig() {
+    }
+}

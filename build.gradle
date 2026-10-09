@@ -1,0 +1,44 @@
+plugins {
+    id 'java'
+}
+
+group = 'io.github.seraphina'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation platform('org.ow2.asm:asm-bom:9.10.1')
+    implementation 'org.ow2.asm:asm'
+    implementation 'org.ow2.asm:asm-tree'
+    implementation 'org.ow2.asm:asm-commons'
+    implementation 'org.ow2.asm:asm-analysis'
+    implementation 'org.ow2.asm:asm-util'
+
+    implementation platform('org.apache.logging.log4j:log4j-bom:2.26.1')
+    implementation 'org.apache.logging.log4j:log4j-api'
+    implementation 'org.apache.logging.log4j:log4j-core'
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+jar {
+    manifest {
+        attributes(
+                'Main-Class': 'io.github.seraphina.obf.Main',
+                'Implementation-Version': '1.0'
+        )
+    }
+}
