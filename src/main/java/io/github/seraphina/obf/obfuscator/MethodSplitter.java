@@ -7,6 +7,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -76,6 +77,9 @@ public class MethodSplitter {
             if (originalNode == null || (node.access & Opcodes.ACC_ANNOTATION) != 0) {
                 continue;
             }
+            if (isMixinClass(node)) {
+                continue;
+            }
             if ((node.access & Opcodes.ACC_INTERFACE) != 0 && (node.version & 0xFFFF) < Opcodes.V1_8) {
                 continue;
             }
@@ -84,6 +88,23 @@ public class MethodSplitter {
                 splitMethod(node, originalNode, methods.get(index), originalNode.methods.get(index));
             }
         }
+    }
+
+    private boolean isMixinClass(ClassNode node) {
+        if (node.name.toLowerCase(java.util.Locale.ROOT).contains("mixin")) {
+            return true;
+        }
+        for (java.util.List<AnnotationNode> annotations : java.util.Arrays.asList(node.visibleAnnotations, node.invisibleAnnotations)) {
+            if (annotations == null) {
+                continue;
+            }
+            for (AnnotationNode annotation : annotations) {
+                if (annotation.desc != null && annotation.desc.toLowerCase(java.util.Locale.ROOT).contains("mixin")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public List<ClassNode> getGeneratedClasses() {
@@ -250,13 +271,7 @@ public class MethodSplitter {
 
     private MethodNode createChunk(ClassNode node, MethodNode method, ClassNode target, List<AbstractInsnNode> real, List<Integer> positions, Frame<BasicValue>[] frames, int start, int end, boolean last) {
         boolean nested = target != node;
-        int majorVersion = node.version & 0xFFFF;
-        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        if (!nested && (node.access & Opcodes.ACC_INTERFACE) != 0 && majorVersion < Opcodes.V9) {
-            access |= Opcodes.ACC_PUBLIC;
-        } else if (!nested) {
-            access |= Opcodes.ACC_PRIVATE;
-        }
+        int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         String descriptor = "([Ljava/lang/Object;)" + (last ? Type.getReturnType(method.desc).getDescriptor() : "V");
         MethodNode chunk = new MethodNode(access, nextChunkName(target), descriptor, null, null);
         for (int position = start; position < end; position++) {
@@ -588,7 +603,7 @@ public class MethodSplitter {
         }
         ClassNode generated = new ClassNode();
         generated.version = node.version;
-        generated.access = Opcodes.ACC_FINAL | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC;
+        generated.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC;
         generated.name = NameUtility.allocate(NameUtility.packageName(node.name), classCounters, allocatedClassNames);
         generated.superName = "java/lang/Object";
         if ((node.version & 0xFFFF) >= Opcodes.V11) {

@@ -9,6 +9,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FieldInsnNode;
@@ -35,6 +36,7 @@ import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Locale;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import java.util.jar.JarEntry;
@@ -89,6 +92,10 @@ public class Obfuscator {
         for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
             if (!entry.getKey().startsWith("META-INF/services/")) {
                 continue;
+            }
+            String serviceName = entry.getKey().substring("META-INF/services/".length());
+            if (!serviceName.isEmpty()) {
+                serviceProviders.add(NameUtility.internalName(serviceName));
             }
             for (String line : new String(entry.getValue(), StandardCharsets.UTF_8).split("[\\r\\n]+")) {
                 String name = line.trim();
@@ -343,8 +350,8 @@ public class Obfuscator {
             return true;
         }
         Set<String> pinnedNames = reflectivePins.get(node.name);
-        if (stringReferencedClasses.contains(node.name) && !reflectiveRewrittenNames.contains(name)
-                || reflectiveNamePins.contains(name) || pinnedNames != null && pinnedNames.contains(name)) {
+        boolean pinnedByClass = (isMixinClass(node) || stringReferencedClasses.contains(node.name)) && !reflectiveRewrittenNames.contains(name);
+        if (pinnedByClass || reflectiveNamePins.contains(name) || pinnedNames != null && pinnedNames.contains(name)) {
             return true;
         }
         if (name.charAt(0) == '<' || (access & Opcodes.ACC_NATIVE) != 0) {
@@ -508,6 +515,23 @@ public class Obfuscator {
         if (hierarchy.getClasses().containsKey(internalName)) {
             stringReferencedClasses.add(internalName);
         }
+    }
+
+    private boolean isMixinClass(ClassNode node) {
+        if (node.name.toLowerCase(Locale.ROOT).contains("mixin")) {
+            return true;
+        }
+        for (List<AnnotationNode> annotations : Arrays.asList(node.visibleAnnotations, node.invisibleAnnotations)) {
+            if (annotations == null) {
+                continue;
+            }
+            for (AnnotationNode annotation : annotations) {
+                if (annotation.desc != null && annotation.desc.toLowerCase(Locale.ROOT).contains("mixin")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private List<String> memberKeys(ClassHierarchy hierarchy, String owner, String name, boolean method) {
