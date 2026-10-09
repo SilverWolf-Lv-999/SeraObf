@@ -28,6 +28,15 @@ public class Main {
             if (args.length >= 7) {
                 config.keepServiceNames = Boolean.parseBoolean(args[6]);
             }
+            if (args.length >= 8) {
+                config.obfuscateClassPathEnabled = Boolean.parseBoolean(args[7]);
+            }
+            if (args.length >= 9) {
+                config.splitSubPath = Boolean.parseBoolean(args[8]);
+            }
+            if (args.length >= 10) {
+                config.dictionarySeed = Long.parseLong(args[9]);
+            }
             new Obfuscator(config, System.out::println, value -> {
             }).obfuscate();
             return;

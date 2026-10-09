@@ -12,9 +12,15 @@ public final class ClientConfig {
 
     public String obfuscateClassPath = "obf.myapp.random";
 
+    public boolean obfuscateClassPathEnabled = true;
+
+    public boolean splitSubPath = false;
+
     public boolean renameClasses = true;
 
     public boolean renameMembers = true;
+
+    public long dictionarySeed = 0L;
 
     public boolean encryptStrings = true;
 

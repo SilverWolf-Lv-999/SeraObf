@@ -18,11 +18,13 @@ import org.objectweb.asm.tree.InnerClassNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.MultiANewArrayInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -62,7 +64,6 @@ public class Obfuscator {
     private final Map<String, String> fieldMapping = new HashMap<>();
     private final Map<String, String> memberGroups = new HashMap<>();
     private final Map<String, String> outerNames = new HashMap<>();
-    private final Map<String, Integer> classCounters = new HashMap<>();
     private final Set<String> allocatedClassNames = new HashSet<>();
     private final List<String> keptClassRules = new ArrayList<>();
     private final List<String> keptMemberRules = new ArrayList<>();
@@ -73,6 +74,9 @@ public class Obfuscator {
     private final Set<String> reflectiveNamePins = new HashSet<>();
     private final Map<String, Set<String>> reflectivePins = new HashMap<>();
     private final List<ReflectiveString> reflectiveStrings = new ArrayList<>();
+    private final Map<String, String> classGroups = new HashMap<>();
+    private final Map<String, String> classGroupPaths = new HashMap<>();
+    private NameAllocator nameAllocator;
     private String classPathPrefix = "";
 
     public Obfuscator(ClientConfig config, Consumer<String> logger, IntConsumer progress) {
@@ -83,6 +87,8 @@ public class Obfuscator {
 
     public void obfuscate() throws Exception {
         long startTime = System.currentTimeMillis();
+        nameAllocator = new NameAllocator(config.dictionarySeed);
+        logger.accept("词典种子: " + nameAllocator.getSeed());
         File inputFile = new File(config.inputJar);
         File outputFile = new File(config.outputJar);
         logger.accept("读取输入: " + inputFile.getAbsolutePath());
@@ -137,6 +143,9 @@ public class Obfuscator {
 
         try (URLClassLoader classLoader = createClassLoader(inputFile)) {
             ClassHierarchy hierarchy = new ClassHierarchy(classes, classLoader);
+            if (config.splitSubPath && config.renameClasses) {
+                buildSubPathGroups(hierarchy);
+            }
             buildClassMapping(hierarchy);
             if (config.renameMembers) {
                 collectStringReferencedClasses(hierarchy);
@@ -196,7 +205,7 @@ public class Obfuscator {
                 prefixBuilder.append(part).append('/');
             }
         }
-        classPathPrefix = prefixBuilder.toString();
+        classPathPrefix = config.obfuscateClassPathEnabled ? prefixBuilder.toString() : "";
         for (ClassNode node : classes.values()) {
             for (InnerClassNode innerClass : node.innerClasses) {
                 if (innerClass.outerName != null) {
@@ -207,7 +216,6 @@ public class Obfuscator {
         for (String name : classes.keySet()) {
             mapClassName(name, classes);
         }
-        allocatedClassNames.addAll(classMapping.values());
     }
 
     private String mapClassName(String name, Map<String, ClassNode> classes) {
@@ -217,13 +225,21 @@ public class Obfuscator {
         }
         if (!config.renameClasses || name.equals("module-info") || NameUtility.simpleName(name).equals("package-info") || serviceProviders.contains(name) || isKeptClass(name)) {
             classMapping.put(name, name);
+            allocatedClassNames.add(name);
             return name;
         }
         String outer = outerNames.get(name);
-        String prefix = outer != null && !outer.equals(name) && classes.containsKey(outer)
-                ? mapClassName(outer, classes) + "$"
-                : classPathPrefix.isEmpty() ? NameUtility.packageName(name) : classPathPrefix;
-        String candidate = NameUtility.allocate(prefix, classCounters, allocatedClassNames);
+        String prefix;
+        if (outer != null && !outer.equals(name) && classes.containsKey(outer)) {
+            prefix = mapClassName(outer, classes) + "$";
+        } else {
+            String base = classPathPrefix.isEmpty() ? NameUtility.packageName(name) : classPathPrefix;
+            prefix = config.splitSubPath ? base + subPathOf(name) : base;
+        }
+        String candidate;
+        do {
+            candidate = prefix + nameAllocator.nextClassName();
+        } while (!allocatedClassNames.add(candidate));
         classMapping.put(name, candidate);
         return candidate;
     }
@@ -289,7 +305,6 @@ public class Obfuscator {
         }
 
         Map<String, String> groupNames = new HashMap<>();
-        int index = 0;
         for (ClassNode node : classes.values()) {
             for (MethodNode method : node.methods) {
                 if (method.name.charAt(0) == '<') {
@@ -303,7 +318,7 @@ public class Obfuscator {
                         newName = method.name;
                     } else {
                         do {
-                            newName = NameUtility.nextName(index++);
+                            newName = nameAllocator.nextMethodName();
                         } while (!usedNames.add(newName));
                     }
                     groupNames.put(group, newName);
@@ -319,7 +334,7 @@ public class Obfuscator {
                         newName = field.name;
                     } else {
                         do {
-                            newName = NameUtility.nextName(index++);
+                            newName = nameAllocator.nextFieldName();
                         } while (!usedNames.add(newName));
                     }
                     groupNames.put(group, newName);
@@ -403,6 +418,153 @@ public class Obfuscator {
             }
         }
         return false;
+    }
+
+    private void buildSubPathGroups(ClassHierarchy hierarchy) {
+        Map<String, ClassNode> classes = hierarchy.getClasses();
+        for (ClassNode node : classes.values()) {
+            classGroups.putIfAbsent(node.name, node.name);
+            for (InnerClassNode inner : node.innerClasses) {
+                if (inner.name.equals(node.name) && inner.outerName != null && classes.containsKey(inner.outerName)) {
+                    unionClass(node.name, inner.outerName);
+                }
+            }
+        }
+        for (ClassNode node : classes.values()) {
+            for (String type : referencedTypes(node)) {
+                ClassNode target = classes.get(type);
+                if (target != null && (target.access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) == 0) {
+                    unionClass(node.name, target.name);
+                }
+            }
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                    boolean call = instruction instanceof MethodInsnNode;
+                    if (!call && !(instruction instanceof FieldInsnNode)) {
+                        continue;
+                    }
+                    String owner = call ? ((MethodInsnNode) instruction).owner : ((FieldInsnNode) instruction).owner;
+                    if (!classes.containsKey(owner)) {
+                        continue;
+                    }
+                    String name = call ? ((MethodInsnNode) instruction).name : ((FieldInsnNode) instruction).name;
+                    String descriptor = call ? ((MethodInsnNode) instruction).desc : ((FieldInsnNode) instruction).desc;
+                    int access = memberAccess(hierarchy, owner, name, descriptor, call);
+                    if (access >= 0 && (access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) == 0) {
+                        unionClass(node.name, owner);
+                    }
+                }
+            }
+        }
+    }
+
+    private int memberAccess(ClassHierarchy hierarchy, String owner, String name, String descriptor, boolean method) {
+        Set<String> visited = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(owner);
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            ClassNode node = hierarchy.getClasses().get(current);
+            if (node == null) {
+                continue;
+            }
+            if (method) {
+                for (MethodNode candidate : node.methods) {
+                    if (candidate.name.equals(name) && candidate.desc.equals(descriptor)) {
+                        return candidate.access;
+                    }
+                }
+            } else {
+                for (FieldNode candidate : node.fields) {
+                    if (candidate.name.equals(name) && candidate.desc.equals(descriptor)) {
+                        return candidate.access;
+                    }
+                }
+            }
+            if (node.superName != null) {
+                queue.add(node.superName);
+            }
+            queue.addAll(node.interfaces);
+        }
+        return -1;
+    }
+
+    private Set<String> referencedTypes(ClassNode node) {
+        Set<String> types = new HashSet<>();
+        if (node.superName != null) {
+            types.add(node.superName);
+        }
+        types.addAll(node.interfaces);
+        for (FieldNode field : node.fields) {
+            addDescriptorTypes(types, field.desc);
+        }
+        for (MethodNode method : node.methods) {
+            addDescriptorTypes(types, method.desc);
+            if (method.exceptions != null) {
+                types.addAll(method.exceptions);
+            }
+            for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
+                if (instruction instanceof TypeInsnNode) {
+                    types.add(((TypeInsnNode) instruction).desc);
+                } else if (instruction instanceof FieldInsnNode) {
+                    types.add(((FieldInsnNode) instruction).owner);
+                    addDescriptorTypes(types, ((FieldInsnNode) instruction).desc);
+                } else if (instruction instanceof MethodInsnNode) {
+                    types.add(((MethodInsnNode) instruction).owner);
+                    addDescriptorTypes(types, ((MethodInsnNode) instruction).desc);
+                } else if (instruction instanceof InvokeDynamicInsnNode) {
+                    addDescriptorTypes(types, ((InvokeDynamicInsnNode) instruction).desc);
+                } else if (instruction instanceof MultiANewArrayInsnNode) {
+                    addDescriptorTypes(types, ((MultiANewArrayInsnNode) instruction).desc);
+                } else if (instruction instanceof LdcInsnNode && ((LdcInsnNode) instruction).cst instanceof Type) {
+                    addType(types, (Type) ((LdcInsnNode) instruction).cst);
+                }
+            }
+        }
+        return types;
+    }
+
+    private void addDescriptorTypes(Set<String> types, String descriptor) {
+        Type type = Type.getType(descriptor);
+        if (type.getSort() == Type.METHOD) {
+            for (Type argument : type.getArgumentTypes()) {
+                addType(types, argument);
+            }
+            addType(types, type.getReturnType());
+        } else {
+            addType(types, type);
+        }
+    }
+
+    private void addType(Set<String> types, Type type) {
+        if (type.getSort() == Type.OBJECT) {
+            types.add(type.getInternalName());
+        } else if (type.getSort() == Type.ARRAY) {
+            addType(types, type.getElementType());
+        }
+    }
+
+    private void unionClass(String left, String right) {
+        classGroups.putIfAbsent(left, left);
+        classGroups.putIfAbsent(right, right);
+        classGroups.put(findClass(left), findClass(right));
+    }
+
+    private String findClass(String key) {
+        String parent = classGroups.get(key);
+        if (parent == null || parent.equals(key)) {
+            return key;
+        }
+        String root = findClass(parent);
+        classGroups.put(key, root);
+        return root;
+    }
+
+    private String subPathOf(String className) {
+        return classGroupPaths.computeIfAbsent(findClass(className), key -> nameAllocator.nextPackagePath());
     }
 
     private void collectReflectiveStrings(ClassHierarchy hierarchy) {
@@ -605,7 +767,7 @@ public class Obfuscator {
         }
         List<ClassNode> generatedClasses = new ArrayList<>();
         if (config.splitMethods) {
-            MethodSplitter splitter = new MethodSplitter(config, classes, remappedClasses, classMapping, originalNames, classLoader, classCounters, allocatedClassNames);
+            MethodSplitter splitter = new MethodSplitter(config, classes, remappedClasses, classMapping, originalNames, classLoader, nameAllocator, allocatedClassNames);
             splitter.splitAll();
             generatedClasses.addAll(splitter.getGeneratedClasses());
             logger.accept("方法拆分 " + splitter.getSplitMethodCount() + " 个方法, 生成类 " + generatedClasses.size() + " 个");
@@ -727,10 +889,9 @@ public class Obfuscator {
         for (MethodNode method : node.methods) {
             names.add(method.name);
         }
-        int index = 0;
         String name;
         do {
-            name = NameUtility.nextName(index++);
+            name = nameAllocator.nextMethodName();
         } while (names.contains(name));
         return name;
     }

@@ -36,6 +36,7 @@ public class MainWindow extends JFrame {
     private final JTextField classPathField = new JTextField(config.obfuscateClassPath);
     private final JTextField keepField = new JTextField();
     private final JTextField replaceField = new JTextField();
+    private final JTextField seedField = new JTextField("0");
     private final JCheckBox classBox = new JCheckBox("重命名类名", true);
     private final JCheckBox memberBox = new JCheckBox("重命名方法/字段", true);
     private final JCheckBox stringBox = new JCheckBox("字符串加密", true);
@@ -44,6 +45,8 @@ public class MainWindow extends JFrame {
     private final JCheckBox randomClassBox = new JCheckBox("随机类", true);
     private final JCheckBox randomMethodBox = new JCheckBox("随机方法名", true);
     private final JCheckBox serviceBox = new JCheckBox("保留服务类名", true);
+    private final JCheckBox classPathBox = new JCheckBox("混淆类路径", true);
+    private final JCheckBox subPathBox = new JCheckBox("子路径拆分", false);
     private final JTextArea logArea = new JTextArea();
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel statusLabel = new JLabel("就绪");
@@ -108,12 +111,21 @@ public class MainWindow extends JFrame {
         constraints.gridwidth = 2;
         constraints.weightx = 1;
         filesPanel.add(replaceField, constraints);
+        constraints.gridx = 0;
+        constraints.gridy = fields.length + 3;
+        constraints.gridwidth = 1;
+        constraints.weightx = 0;
+        filesPanel.add(new JLabel("词典种子"), constraints);
+        constraints.gridx = 1;
+        constraints.gridwidth = 2;
+        constraints.weightx = 1;
+        filesPanel.add(seedField, constraints);
         constraints.gridwidth = 1;
         inputButton.addActionListener(event -> selectInputJar());
         outputButton.addActionListener(event -> selectOutputJar());
         libraryButton.addActionListener(event -> selectLibraryJars());
 
-        JPanel optionPanel = new JPanel(new GridLayout(2, 4, 4, 4));
+        JPanel optionPanel = new JPanel(new GridLayout(2, 5, 4, 4));
         optionPanel.setBorder(new TitledBorder("混淆选项"));
         optionPanel.add(classBox);
         optionPanel.add(memberBox);
@@ -123,6 +135,9 @@ public class MainWindow extends JFrame {
         optionPanel.add(randomClassBox);
         optionPanel.add(randomMethodBox);
         optionPanel.add(serviceBox);
+        optionPanel.add(classPathBox);
+        optionPanel.add(subPathBox);
+        classPathBox.addActionListener(event -> classPathField.setEnabled(classPathBox.isSelected()));
 
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -215,6 +230,11 @@ public class MainWindow extends JFrame {
         config.obfuscateClassPath = classPathField.getText().trim();
         config.keepRules = keepField.getText().trim();
         config.stringReplacements = replaceField.getText().trim();
+        try {
+            config.dictionarySeed = Long.parseLong(seedField.getText().trim());
+        } catch (NumberFormatException exception) {
+            config.dictionarySeed = 0L;
+        }
         config.renameClasses = classBox.isSelected();
         config.renameMembers = memberBox.isSelected();
         config.encryptStrings = stringBox.isSelected();
@@ -223,6 +243,8 @@ public class MainWindow extends JFrame {
         config.randomSplitClass = randomClassBox.isSelected();
         config.randomSplitMethodName = randomMethodBox.isSelected();
         config.keepServiceNames = serviceBox.isSelected();
+        config.obfuscateClassPathEnabled = classPathBox.isSelected();
+        config.splitSubPath = subPathBox.isSelected();
 
         logArea.setText("");
         progressBar.setValue(0);
@@ -259,9 +281,10 @@ public class MainWindow extends JFrame {
         inputField.setEnabled(!busy);
         outputField.setEnabled(!busy);
         libraryField.setEnabled(!busy);
-        classPathField.setEnabled(!busy);
+        classPathField.setEnabled(!busy && classPathBox.isSelected());
         keepField.setEnabled(!busy);
         replaceField.setEnabled(!busy);
+        seedField.setEnabled(!busy);
         classBox.setEnabled(!busy);
         memberBox.setEnabled(!busy);
         stringBox.setEnabled(!busy);
@@ -270,6 +293,8 @@ public class MainWindow extends JFrame {
         randomClassBox.setEnabled(!busy);
         randomMethodBox.setEnabled(!busy);
         serviceBox.setEnabled(!busy);
+        classPathBox.setEnabled(!busy);
+        subPathBox.setEnabled(!busy);
         inputButton.setEnabled(!busy);
         outputButton.setEnabled(!busy);
         libraryButton.setEnabled(!busy);

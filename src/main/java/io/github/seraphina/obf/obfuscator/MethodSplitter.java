@@ -51,7 +51,7 @@ public class MethodSplitter {
     private final Map<String, String> classMapping;
     private final Map<String, String> originalNames;
     private final ClassLoader classLoader;
-    private final Map<String, Integer> classCounters;
+    private final NameAllocator nameAllocator;
     private final Set<String> allocatedClassNames;
     private final List<ClassNode> generatedClasses = new ArrayList<>();
     private final Map<String, ClassNode> holders = new HashMap<>();
@@ -60,14 +60,14 @@ public class MethodSplitter {
     private final Map<String, Class<?>> typeCache = new HashMap<>();
     private int splitMethodCount;
 
-    public MethodSplitter(ClientConfig config, Map<String, ClassNode> originals, Map<String, ClassNode> remapped, Map<String, String> classMapping, Map<String, String> originalNames, ClassLoader classLoader, Map<String, Integer> classCounters, Set<String> allocatedClassNames) {
+    public MethodSplitter(ClientConfig config, Map<String, ClassNode> originals, Map<String, ClassNode> remapped, Map<String, String> classMapping, Map<String, String> originalNames, ClassLoader classLoader, NameAllocator nameAllocator, Set<String> allocatedClassNames) {
         this.config = config;
         this.originals = originals;
         this.remapped = remapped;
         this.classMapping = classMapping;
         this.originalNames = originalNames;
         this.classLoader = classLoader;
-        this.classCounters = classCounters;
+        this.nameAllocator = nameAllocator;
         this.allocatedClassNames = allocatedClassNames;
     }
 
@@ -604,7 +604,12 @@ public class MethodSplitter {
         ClassNode generated = new ClassNode();
         generated.version = node.version;
         generated.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC;
-        generated.name = NameUtility.allocate(NameUtility.packageName(node.name), classCounters, allocatedClassNames);
+        String prefix = NameUtility.packageName(node.name);
+        String candidate;
+        do {
+            candidate = prefix + nameAllocator.nextClassName();
+        } while (!allocatedClassNames.add(candidate));
+        generated.name = candidate;
         generated.superName = "java/lang/Object";
         if ((node.version & 0xFFFF) >= Opcodes.V11) {
             generated.nestHostClass = host;
@@ -627,10 +632,9 @@ public class MethodSplitter {
             return names;
         });
         if (config.randomSplitMethodName) {
-            int index = 0;
             String candidate;
             do {
-                candidate = NameUtility.nextName(index++);
+                candidate = nameAllocator.nextMethodName();
             } while (!used.add(candidate));
             return candidate;
         }

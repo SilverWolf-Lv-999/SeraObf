@@ -1,6 +1,11 @@
 package io.github.seraphina.obf.obfuscator;
 
 import io.github.seraphina.obf.common.config.ClientConfig;
+import io.github.seraphina.obf.common.config.CommonConfig;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodNode;
 import org.junit.jupiter.api.Test;
 
 import javax.tools.ToolProvider;
@@ -9,7 +14,13 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -147,12 +158,76 @@ class ObfuscatorTest {
             "");
 
     @Test
+    void renamesWithDictionaries() throws Exception {
+        Path workDir = Files.createTempDirectory("seraobf-dictionary");
+        Path inputJar = compileSample(workDir);
+
+        Path firstJar = workDir.resolve("dictionary.jar");
+        ClientConfig first = prepare(inputJar, firstJar, "obf.dictionary.probe", true, true, true, "", "", false);
+        first.dictionarySeed = 20261009L;
+        obfuscate(first);
+
+        Path repeatJar = workDir.resolve("dictionary-repeat.jar");
+        ClientConfig repeat = prepare(inputJar, repeatJar, "obf.dictionary.probe", true, true, true, "", "", false);
+        repeat.dictionarySeed = 20261009L;
+        obfuscate(repeat);
+
+        Path otherJar = workDir.resolve("dictionary-other.jar");
+        ClientConfig other = prepare(inputJar, otherJar, "obf.dictionary.probe", true, true, true, "", "", false);
+        other.dictionarySeed = 20261010L;
+        obfuscate(other);
+
+        Map<String, String> entries = classEntries(firstJar);
+        assertEquals(entries, classEntries(repeatJar));
+        assertNotEquals(entries, classEntries(otherJar));
+        Set<String> originalMethods = memberNames(inputJar, true);
+        Set<String> originalFields = memberNames(inputJar, false);
+
+        for (String entry : entries.keySet()) {
+            String[] segments = entry.substring(0, entry.length() - ".class".length()).split("/");
+            assertEquals("obf", segments[0], entry);
+            assertEquals("dictionary", segments[1], entry);
+            assertEquals("probe", segments[2], entry);
+            for (String word : segments[3].split("\\$")) {
+                assertTrue(isDictionaryWord(CommonConfig.CLASS_NAME_WORDS, word), entry);
+            }
+        }
+        for (ClassNode node : readClassNodes(firstJar)) {
+            for (MethodNode method : node.methods) {
+                assertTrue(method.name.startsWith("<") || method.name.startsWith("$") || originalMethods.contains(method.name) || isDictionaryWord(CommonConfig.METHOD_NAME_WORDS, method.name), node.name + '#' + method.name);
+            }
+            for (FieldNode field : node.fields) {
+                assertTrue(field.name.startsWith("$") || originalFields.contains(field.name) || isDictionaryWord(CommonConfig.FIELD_NAME_WORDS, field.name), node.name + '#' + field.name);
+            }
+        }
+        assertFalse(memberNames(firstJar, true).contains("text"));
+
+        Path subPathJar = workDir.resolve("dictionary-subpath.jar");
+        ClientConfig subPath = prepare(inputJar, subPathJar, "", true, true, true, "", "", false);
+        subPath.dictionarySeed = 20261009L;
+        subPath.obfuscateClassPathEnabled = false;
+        subPath.splitSubPath = true;
+        obfuscate(subPath);
+
+        for (String entry : classEntries(subPathJar).keySet()) {
+            String[] segments = entry.substring(0, entry.length() - ".class".length()).split("/");
+            assertEquals("demo", segments[0], entry);
+            for (int index = 1; index < segments.length - 1; index++) {
+                assertTrue(isDictionaryWord(CommonConfig.PACKAGE_NAME_WORDS, segments[index]), entry);
+            }
+            for (String word : segments[segments.length - 1].split("\\$")) {
+                assertTrue(isDictionaryWord(CommonConfig.CLASS_NAME_WORDS, word), entry);
+            }
+        }
+    }
+
+    @Test
     void obfuscatesJarEndToEnd() throws Exception {
         Path workDir = Files.createTempDirectory("seraobf");
         Path inputJar = compileSample(workDir);
 
         Path outputJar = workDir.resolve("output.jar");
-        String mainClass = obfuscate(inputJar, outputJar, "obf.myapp.random", true, true, true, "", "", true);
+        String mainClass = obfuscate(prepare(inputJar, outputJar, "obf.myapp.random", true, true, true, "", "", true));
         assertTrue(mainClass.startsWith("obf.myapp.random."), mainClass);
         assertTrue(countClasses(outputJar) > countClasses(inputJar));
         String rsrcMainClass;
@@ -183,16 +258,16 @@ class ObfuscatorTest {
         assertEquals("demo.GreeterProvider", serviceEntry[1]);
 
         Path keptJar = workDir.resolve("kept.jar");
-        String keptMainClass = obfuscate(inputJar, keptJar, "", true, true, true, "", "", true);
+        String keptMainClass = obfuscate(prepare(inputJar, keptJar, "", true, true, true, "", "", true));
         assertTrue(keptMainClass.startsWith("demo."), keptMainClass);
         assertTrue(runJar(keptJar).contains("prefix-value-hidden-value"));
 
         Path plainJar = workDir.resolve("plain.jar");
-        obfuscate(inputJar, plainJar, "obf.myapp.random", false, true, true, "", "", true);
+        obfuscate(prepare(inputJar, plainJar, "obf.myapp.random", false, true, true, "", "", true));
         assertEquals(countClasses(inputJar), countClasses(plainJar));
 
         Path inlineJar = workDir.resolve("inline.jar");
-        String inlineMainClass = obfuscate(inputJar, inlineJar, "obf.myapp.random", true, false, false, "", "", true);
+        String inlineMainClass = obfuscate(prepare(inputJar, inlineJar, "obf.myapp.random", true, false, false, "", "", true));
         assertEquals(countClasses(inputJar), countClasses(inlineJar));
         try (JarFile jarFile = new JarFile(inlineJar.toFile())) {
             byte[] classBytes;
@@ -204,11 +279,11 @@ class ObfuscatorTest {
         assertTrue(runJar(inlineJar).contains("prefix-value-hidden-value"));
 
         Path replacedJar = workDir.resolve("replaced.jar");
-        obfuscate(inputJar, replacedJar, "", true, true, true, "", "hidden-value=patched-value", true);
+        obfuscate(prepare(inputJar, replacedJar, "", true, true, true, "", "hidden-value=patched-value", true));
         assertTrue(runJar(replacedJar).contains("patched-value"));
 
         Path serviceJar = workDir.resolve("service.jar");
-        obfuscate(inputJar, serviceJar, "", true, true, true, "", "", false);
+        obfuscate(prepare(inputJar, serviceJar, "", true, true, true, "", "", false));
         String[] remappedService = readServiceEntry(serviceJar);
         assertNotEquals("META-INF/services/demo.Greeter", remappedService[0]);
         assertNotEquals("demo.GreeterProvider", remappedService[1]);
@@ -216,6 +291,22 @@ class ObfuscatorTest {
             assertNotNull(jarFile.getJarEntry(remappedService[1].replace('.', '/') + ".class"));
         }
         assertTrue(runJar(serviceJar).contains("prefix-value-hidden-value"));
+
+        Path subPathJar = workDir.resolve("subpath.jar");
+        ClientConfig subPathConfig = prepare(inputJar, subPathJar, "obf.myapp.random", true, true, true, "", "", true);
+        subPathConfig.splitSubPath = true;
+        String subPathMainClass = obfuscate(subPathConfig);
+        assertTrue(subPathMainClass.startsWith("obf.myapp.random."), subPathMainClass);
+        assertTrue(subPathMainClass.substring("obf.myapp.random.".length()).contains("."), subPathMainClass);
+        assertTrue(runJar(subPathJar).contains("prefix-value-hidden-value"));
+
+        Path keepPackageJar = workDir.resolve("keeppackage.jar");
+        ClientConfig keepPackageConfig = prepare(inputJar, keepPackageJar, "obf.myapp.random", true, true, true, "", "", true);
+        keepPackageConfig.obfuscateClassPathEnabled = false;
+        keepPackageConfig.splitSubPath = true;
+        String keepPackageMainClass = obfuscate(keepPackageConfig);
+        assertTrue(keepPackageMainClass.startsWith("demo."), keepPackageMainClass);
+        assertTrue(runJar(keepPackageJar).contains("prefix-value-hidden-value"));
     }
 
     private static Path compileSample(Path workDir) throws Exception {
@@ -245,14 +336,17 @@ class ObfuscatorTest {
         return jarPath;
     }
 
-    private static String obfuscate(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName, String keepRules, String stringReplacements, boolean keepServiceNames) throws Exception {
+    private static ClientConfig prepare(Path inputJar, Path outputJar, String obfuscateClassPath, boolean splitMethods, boolean randomSplitClass, boolean randomSplitMethodName, String keepRules, String stringReplacements, boolean keepServiceNames) {
         ClientConfig config = ClientConfig.INSTANCE;
         config.inputJar = inputJar.toString();
         config.outputJar = outputJar.toString();
         config.libraryJars = "";
         config.obfuscateClassPath = obfuscateClassPath;
+        config.obfuscateClassPathEnabled = true;
+        config.splitSubPath = false;
         config.renameClasses = true;
         config.renameMembers = true;
+        config.dictionarySeed = 0L;
         config.encryptStrings = true;
         config.stripDebugInfo = true;
         config.splitMethods = splitMethods;
@@ -261,10 +355,14 @@ class ObfuscatorTest {
         config.keepRules = keepRules;
         config.stringReplacements = stringReplacements;
         config.keepServiceNames = keepServiceNames;
+        return config;
+    }
+
+    private static String obfuscate(ClientConfig config) throws Exception {
         new Obfuscator(config, message -> {
         }, value -> {
         }).obfuscate();
-        try (JarFile jarFile = new JarFile(outputJar.toFile())) {
+        try (JarFile jarFile = new JarFile(config.outputJar)) {
             return jarFile.getManifest().getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
         }
     }
@@ -296,6 +394,68 @@ class ObfuscatorTest {
             }
         }
         return count;
+    }
+
+    private static boolean isDictionaryWord(String[] words, String name) {
+        String base = name.replaceAll("\\d+$", "");
+        for (String word : words) {
+            if (word.equals(base)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, String> classEntries(Path jarPath) throws Exception {
+        Map<String, String> entries = new LinkedHashMap<>();
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            Enumeration<JarEntry> enumeration = jarFile.entries();
+            while (enumeration.hasMoreElements()) {
+                JarEntry entry = enumeration.nextElement();
+                if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+                    continue;
+                }
+                try (InputStream stream = jarFile.getInputStream(entry)) {
+                    entries.put(entry.getName(), new String(stream.readAllBytes(), StandardCharsets.ISO_8859_1));
+                }
+            }
+        }
+        return entries;
+    }
+
+    private static Set<String> memberNames(Path jarPath, boolean method) throws Exception {
+        Set<String> names = new HashSet<>();
+        for (ClassNode node : readClassNodes(jarPath)) {
+            if (method) {
+                for (MethodNode candidate : node.methods) {
+                    names.add(candidate.name);
+                }
+            } else {
+                for (FieldNode candidate : node.fields) {
+                    names.add(candidate.name);
+                }
+            }
+        }
+        return names;
+    }
+
+    private static List<ClassNode> readClassNodes(Path jarPath) throws Exception {
+        List<ClassNode> nodes = new ArrayList<>();
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            Enumeration<JarEntry> enumeration = jarFile.entries();
+            while (enumeration.hasMoreElements()) {
+                JarEntry entry = enumeration.nextElement();
+                if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+                    continue;
+                }
+                try (InputStream stream = jarFile.getInputStream(entry)) {
+                    ClassNode node = new ClassNode();
+                    new ClassReader(stream.readAllBytes()).accept(node, 0);
+                    nodes.add(node);
+                }
+            }
+        }
+        return nodes;
     }
 
     private static String runJar(Path jarPath) throws Exception {
